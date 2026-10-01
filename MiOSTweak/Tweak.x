@@ -803,11 +803,15 @@ static void miosRedirectLog(NSString *line) {
 %hook NSUserDefaults
 
 - (instancetype)initWithSuiteName:(NSString *)suiteName {
+    // Rewrite a real App Group suite to a PRIVATE per-container domain. The scoped name must NOT start
+    // with "group." — cfprefsd refuses to persist a group-looking suite the app isn't entitled to, so
+    // the old "group.X__mios_<uuid>" scheme silently failed to save and the device-id was regenerated
+    // every launch. "mios.<uuid>.group.X" is a normal private domain that persists in the app's prefs.
     if (gGroupRedirectActive && gContainerUUID.length > 0 &&
         [suiteName isKindOfClass:[NSString class]] &&
-        [suiteName hasPrefix:@"group."] && ![suiteName containsString:@"__mios_"]) {
+        [suiteName hasPrefix:@"group."]) {
         miosRedirectLog([NSString stringWithFormat:@"defaults suite=%@ -> scoped", suiteName]);
-        NSString *scoped = [NSString stringWithFormat:@"%@__mios_%@", suiteName, gContainerUUID];
+        NSString *scoped = [NSString stringWithFormat:@"mios.%@.%@", gContainerUUID, suiteName];
         return %orig(scoped);
     }
     return %orig;
