@@ -104,13 +104,21 @@ static BOOL miosWatchdogArmOrDisable(NSString *name) {
     NSString *armPath = [kMiOSBase stringByAppendingPathComponent:
                          [@"boot_armed_" stringByAppendingString:name]];
     NSFileManager *fm = [NSFileManager defaultManager];
-    if ([fm fileExistsAtPath:armPath]) {
+    long cur = miosBootID();
+    NSString *existing = [NSString stringWithContentsOfFile:armPath encoding:NSUTF8StringEncoding error:nil];
+    if (existing.length) {
+        long armed = (long)[existing longLongValue];
+        if (armed == cur) {
+            // Same boot → this daemon just restarted normally (lsd & co. are on-demand). NOT a crash.
+            return YES;
+        }
+        // Armed on a PREVIOUS boot and never cleared → that boot hung before clearing → self-heal.
         supLog(@"watchdog", [NSString stringWithFormat:
-            @"%@: previous run armed but did not clear (likely crashed) — DISABLE this run (self-heal)", name]);
+            @"%@: prior boot %ld hung (arm never cleared) — DISABLE this boot (self-heal)", name, armed]);
         return NO;
     }
     @try {
-        [[NSString stringWithFormat:@"%ld", miosBootID()] writeToFile:armPath atomically:YES
+        [[NSString stringWithFormat:@"%ld", cur] writeToFile:armPath atomically:YES
                                                     encoding:NSUTF8StringEncoding error:nil];
         [fm setAttributes:@{ NSFilePosixPermissions: @(0666) } ofItemAtPath:armPath error:nil];
     } @catch (__unused id e) {}
@@ -453,23 +461,31 @@ static void initSecurityd(void) {
 }
 
 // ---- Phase 4: lsd (IDFV per container) ------------------------------------------------------------
-// The real vendor-id (IDFV) method, found in the Crane binary's selector table. Hook it to return a
-// per-container vendor id. This build LOGS the method's ABI type encoding (the reply block's layout)
-// and the resolved container, then calls %orig unchanged — so it is safe and tells us the exact reply
-// signature to substitute with next (calling a block with the wrong arity would crash lsd).
+// Real iOS-16.7 IDFV method (from the device's own class dump):
+//   -[_LSDDeviceIdentifierClient getIdentifierOfType:(long long)vendorName:(NSString*)bundleIdentifier:
+//                                (NSString*)completionHandler:(block)]
+// Per-container IDFV WITHOUT touching the completion block (no arity risk): append .m_i_o_s.<uuid> to
+// the vendorName for a container app, then call %orig. The identifier is derived from vendorName, so a
+// per-container vendorName yields a distinct, STABLE IDFV per container. Default containers untouched.
 @interface _LSDDeviceIdentifierClient : NSObject
 @end
 
 %group LSD_Client
 %hook _LSDDeviceIdentifierClient
-- (void)readDeviceVendorIdentifierFromApplicationWithIdentifier:(id)appID reply:(id)reply {
+- (void)getIdentifierOfType:(long long)type vendorName:(id)vendorName
+           bundleIdentifier:(id)bundleID completionHandler:(id)completion {
     @try {
-        Method m = class_getInstanceMethod([self class], _cmd);
-        const char *ty = m ? method_getTypeEncoding(m) : "?";
-        NSString *bid = [appID isKindOfClass:[NSString class]] ? (NSString *)appID : [appID description];
-        NSString *uuid = [bid isKindOfClass:[NSString class]] ? miosActiveContainerForBundle(bid) : nil;
-        supLog(@"lsd", [NSString stringWithFormat:@"readVendorID app=%@ container=%@ reply_type=%s",
-               bid, uuid ?: @"(default)", ty ?: "?"]);
+        if (!miosDisabled() && [bundleID isKindOfClass:[NSString class]] &&
+            [vendorName isKindOfClass:[NSString class]]) {
+            NSString *uuid = miosActiveContainerForBundle((NSString *)bundleID);
+            if (uuid && ![(NSString *)vendorName containsString:@".m_i_o_s."]) {
+                NSString *scoped = [NSString stringWithFormat:@"%@.m_i_o_s.%@", vendorName, uuid];
+                supLog(@"lsd", [NSString stringWithFormat:@"IDFV type=%lld bid=%@ vendor %@ -> %@",
+                       type, bundleID, vendorName, scoped]);
+                %orig(type, scoped, bundleID, completion);
+                return;
+            }
+        }
     } @catch (__unused id e) {}
     %orig;
 }
@@ -537,7 +553,7 @@ static void initLsd(void) {
                     NSArray *b = [fm contentsOfDirectoryAtPath:
                                   [kMiOSBase stringByAppendingPathComponent:@"debug"] error:nil];
                     supLog(name, [NSString stringWithFormat:
-                        @"[ctor] NOT enabled (build=flags-v3). MiOS/ = [%@] ; MiOS/debug/ = [%@] → skip",
+                        @"[ctor] NOT enabled (build=lsd-v4). MiOS/ = [%@] ; MiOS/debug/ = [%@] → skip",
                         [a componentsJoinedByString:@", "] ?: @"(nil)",
                         [b componentsJoinedByString:@", "] ?: @"(nil)"]);
                 } @catch (__unused id e) { supLog(name, @"[ctor] not enabled → skip"); }
