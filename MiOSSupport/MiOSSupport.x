@@ -62,8 +62,6 @@ static BOOL miosDisabled(void) {
 //      boot id, that previous boot never reached SpringBoard → it crashed → we DISABLE for this boot.
 //      Result: one failed boot, then the next boot self-heals with no user action.
 
-static NSString *const kArmPath = @"/var/mobile/Library/Preferences/MiOS/boot_armed";
-
 static BOOL miosSafeMode(void) {
     const char *s = getenv("_MSSafeMode"); if (s && atoi(s) != 0) return YES;
     s = getenv("_SafeMode");               if (s && atoi(s) != 0) return YES;
@@ -86,26 +84,30 @@ static long miosBootID(void) {
     return 0;
 }
 
-// Returns YES if it is safe to install hooks this boot (and arms the watchdog); NO if the previous boot
-// failed to complete (self-disable). World-writable arm file so SpringBoard (mobile) can clear it.
-static BOOL miosWatchdogArmOrDisable(void) {
-    long cur = miosBootID();
-    NSString *existing = [NSString stringWithContentsOfFile:kArmPath encoding:NSUTF8StringEncoding error:nil];
-    if (existing.length) {
-        long armed = (long)[existing longLongValue];
-        if (armed != 0 && armed != cur) {
-            supLog(@"watchdog", [NSString stringWithFormat:
-                @"previous boot %ld never reached SpringBoard — DISABLING daemon hooks this boot (self-heal)", armed]);
-            return NO;                      // last boot crashed → stand down this boot
-        }
-        return YES;                         // armed by a sibling daemon THIS boot → ok
+// Per-daemon, SELF-CLEARING watchdog. Arm a file before hooking; if the daemon survives a short health
+// window, a GCD timer deletes it (hooks are fine). If the daemon instead crashes within that window
+// (e.g. a bad hook hangs boot), the file remains, and the NEXT launch of that daemon sees it and stands
+// down — auto-heal, no user action and no dependence on SpringBoard. Per-daemon file names avoid
+// siblings interfering, and a stale file from an old build (the single "boot_armed") is simply ignored.
+static BOOL miosWatchdogArmOrDisable(NSString *name) {
+    NSString *armPath = [kMiOSBase stringByAppendingPathComponent:
+                         [@"boot_armed_" stringByAppendingString:name]];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if ([fm fileExistsAtPath:armPath]) {
+        supLog(@"watchdog", [NSString stringWithFormat:
+            @"%@: previous run armed but did not clear (likely crashed) — DISABLE this run (self-heal)", name]);
+        return NO;
     }
     @try {
-        [[NSString stringWithFormat:@"%ld", cur] writeToFile:kArmPath atomically:YES
+        [[NSString stringWithFormat:@"%ld", miosBootID()] writeToFile:armPath atomically:YES
                                                     encoding:NSUTF8StringEncoding error:nil];
-        [[NSFileManager defaultManager] setAttributes:@{ NSFilePosixPermissions: @(0666) }
-                                         ofItemAtPath:kArmPath error:nil];
+        [fm setAttributes:@{ NSFilePosixPermissions: @(0666) } ofItemAtPath:armPath error:nil];
     } @catch (__unused id e) {}
+    // Survived the health window → healthy → clear the arm so the next launch proceeds normally.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)25 * NSEC_PER_SEC),
+                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        [[NSFileManager defaultManager] removeItemAtPath:armPath error:nil];
+    });
     return YES;
 }
 
@@ -517,7 +519,7 @@ static void initLsd(void) {
             // --- anti-brick gates (any one of them → install nothing) ---
             if (miosSafeMode())          { supLog(name, @"[ctor] safe mode → skip"); return; }
             if (!miosDaemonEnabled(name)){ supLog(name, @"[ctor] not enabled (no enable_daemons/enable_<name>) → skip"); return; }
-            if (!miosWatchdogArmOrDisable()) { supLog(name, @"[ctor] watchdog: prior boot failed → skip"); return; }
+            if (!miosWatchdogArmOrDisable(name)) { supLog(name, @"[ctor] watchdog: prior run crashed → skip"); return; }
 
             if ([name isEqualToString:@"containermanagerd"])      initContainermanagerd();
             else if ([name isEqualToString:@"cfprefsd"])          initCfprefsd();
