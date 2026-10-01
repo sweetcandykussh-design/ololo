@@ -529,7 +529,20 @@ static void initLsd(void) {
 
             // --- anti-brick gates (any one of them → install nothing) ---
             if (miosSafeMode())          { supLog(name, @"[ctor] safe mode → skip"); return; }
-            if (!miosDaemonEnabled(name)){ supLog(name, @"[ctor] not enabled (no enable_daemons/enable_<name>) → skip"); return; }
+            if (!miosDaemonEnabled(name)) {
+                // Dump what THIS daemon actually sees, so the flag location/name is unambiguous.
+                @try {
+                    NSFileManager *fm = [NSFileManager defaultManager];
+                    NSArray *a = [fm contentsOfDirectoryAtPath:kMiOSBase error:nil];
+                    NSArray *b = [fm contentsOfDirectoryAtPath:
+                                  [kMiOSBase stringByAppendingPathComponent:@"debug"] error:nil];
+                    supLog(name, [NSString stringWithFormat:
+                        @"[ctor] NOT enabled (build=flags-v3). MiOS/ = [%@] ; MiOS/debug/ = [%@] → skip",
+                        [a componentsJoinedByString:@", "] ?: @"(nil)",
+                        [b componentsJoinedByString:@", "] ?: @"(nil)"]);
+                } @catch (__unused id e) { supLog(name, @"[ctor] not enabled → skip"); }
+                return;
+            }
             if (!miosWatchdogArmOrDisable(name)) { supLog(name, @"[ctor] watchdog: prior run crashed → skip"); return; }
 
             if ([name isEqualToString:@"containermanagerd"])      initContainermanagerd();
