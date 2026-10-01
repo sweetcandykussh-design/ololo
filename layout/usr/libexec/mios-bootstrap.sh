@@ -1,6 +1,6 @@
 #!/bin/sh
 # Bring up the miOS container daemon at install time (no reboot — palera1n/rootless safe) and log
-# verbosely so the result is readable in Filza without a terminal.
+# verbosely so the result is readable in Filza without a terminal. No respring is performed.
 LOGDIR=/var/mobile/Library/Preferences/MiOS/debug
 LOG="$LOGDIR/install.log"
 mkdir -p "$LOGDIR"
@@ -22,17 +22,22 @@ mkdir -p "$LOGDIR"
   ls -l /var/jb/usr/libexec/miosd 2>&1
 
   if [ -n "$LCTL" ]; then
-    echo "+ enable";    "$LCTL" enable system/com.mios.containerd 2>&1
-    echo "+ bootout (clear any stale)"; "$LCTL" bootout system/com.mios.containerd 2>&1
-    echo "+ bootstrap"; "$LCTL" bootstrap system "$PL" 2>&1
-    echo "+ kickstart"; "$LCTL" kickstart -kp system/com.mios.containerd 2>&1
-    echo "+ print";     "$LCTL" print system/com.mios.containerd 2>&1 | head -40
+    # palera1n loads /var/jb LaunchDaemons into the GUI (user/foreground) domain, not system, so try
+    # both. bootstrap is a no-op once it's loaded; kickstart -k restarts the running daemon so a
+    # reinstall actually re-execs the new binary.
+    echo "+ bootstrap system"; "$LCTL" bootstrap system "$PL" 2>&1
+    for DOM in system gui/501 user/501; do
+      echo "+ kickstart $DOM"; "$LCTL" kickstart -k "$DOM/com.mios.containerd" 2>&1
+    done
+    for DOM in system gui/501 user/501; do
+      if "$LCTL" print "$DOM/com.mios.containerd" >/dev/null 2>&1; then
+        echo "+ running in domain: $DOM"; break
+      fi
+    done
   fi
 
   echo "=== end ==="
 } >> "$LOG" 2>&1
 
 chown -R 501:501 "$LOGDIR" 2>/dev/null
-# Respring only (not a reboot) so the tweak reloads cleanly.
-killall -9 SpringBoard 2>/dev/null
 exit 0
