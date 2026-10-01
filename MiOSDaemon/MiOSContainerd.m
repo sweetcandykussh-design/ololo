@@ -39,6 +39,12 @@ extern char **environ;
 - (BOOL)replaceContainer:(id)a withContainer:(id)b error:(NSError **)error;
 @end
 
+// SAFETY: real system-container reassignment via MobileContainerManager (replaceContainer /
+// recreateDefaultStructure / destroyContainer) panicked the kernel on iOS 16.7. Until a safe
+// isolation path exists, keep these OFF: the daemon still delivers the per-container spoof config
+// (bootstrap), which is all the device/iOS spoof needs, but never mutates containermanagerd/APFS.
+static const BOOL kMiOSEnableRealContainerSwap = NO;
+
 static NSString *const kBase = @"/var/mobile/Library/Preferences/MiOS";
 static NSString *const kAppDataRoot = @"/var/mobile/Containers/Data/Application";
 static NSString *const kSharedRoot  = @"/var/mobile/Containers/Shared/AppGroup";
@@ -313,6 +319,10 @@ static void switchGroupContainers(NSString *bid, NSString *lid, MCMContainerMana
 
 // Mint a brand-new empty real container; returns its UUID.
 static NSString *opCreate(NSString *bid, NSString *lid) {
+    if (!kMiOSEnableRealContainerSwap) {
+        dlog(@"[create] real container swap disabled (safety) — no-op for %@", bid);
+        return nil;
+    }
     NSString *uuidStr = [NSUUID UUID].UUIDString;
     dlog(@"[create] mint %@ for %@ (MCMAppDataClass=%@)", uuidStr, bid, MCMAppDataClass() ? @"ok" : @"MISSING");
     MCMContainer *c = containerForUUID(bid, uuidStr, YES);
@@ -326,7 +336,13 @@ static NSString *opCreate(NSString *bid, NSString *lid) {
 // Make a saved container the app's active (assigned) container by replacing the current one, and do
 // the same for all of the app's App Group shared containers (full isolation, empty cache per container).
 static BOOL opSwitch(NSString *bid, NSString *lid) {
-    dlog(@"[switch] start bid=%@ lid=%@", bid, lid);
+    dlog(@"[switch] start bid=%@ lid=%@ realSwap=%d", bid, lid, kMiOSEnableRealContainerSwap);
+    if (!kMiOSEnableRealContainerSwap) {
+        // Safe mode: do NOT touch containermanagerd (it panics the kernel here). The caller still
+        // runs writeBootstrap afterwards, so the tweak picks up this container's spoof config.
+        dlog(@"[switch] real container swap disabled (safety) — delivering spoof config only");
+        return YES;
+    }
     NSString *real = storedRealUUID(bid, lid);
     dlog(@"[switch]   storedRealUUID=%@", real ?: @"nil");
     if (!real) real = opCreate(bid, lid);
@@ -385,6 +401,12 @@ static void writeBootstrap(NSString *bid, NSString *lid) {
 }
 
 static BOOL opDelete(NSString *bid, NSString *lid) {
+    if (!kMiOSEnableRealContainerSwap) {
+        // Safe mode: never call destroyContainer (containermanagerd/APFS panics here). Just drop our
+        // own spoof prefs for this logical container; no system container was ever created anyway.
+        dlog(@"[delete] real container swap disabled (safety) — nothing to destroy");
+        return YES;
+    }
     // Destroy this logical container's App Group shared containers first.
     for (NSString *g in appGroupsForBundleID(bid)) {
         if (![g isKindOfClass:[NSString class]] || g.length == 0) continue;
