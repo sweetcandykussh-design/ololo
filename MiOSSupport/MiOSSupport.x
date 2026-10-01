@@ -21,6 +21,7 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 #import <substrate.h>
+#import <Security/Security.h>
 #import <dlfcn.h>
 #import <stdlib.h>
 #import <sys/sysctl.h>
@@ -68,9 +69,13 @@ static BOOL miosSafeMode(void) {
     return NO;
 }
 
-static BOOL miosDaemonOptIn(void) {
-    return [[NSFileManager defaultManager] fileExistsAtPath:
-            [kMiOSBase stringByAppendingPathComponent:@"enable_daemons"]];
+// Per-daemon opt-in: the master "enable_daemons" turns all on; "enable_<name>" turns just one on, so a
+// single daemon can be enabled and tested in isolation (e.g. enable_securityd).
+static BOOL miosDaemonEnabled(NSString *shortName) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if ([fm fileExistsAtPath:[kMiOSBase stringByAppendingPathComponent:@"enable_daemons"]]) return YES;
+    return [fm fileExistsAtPath:[kMiOSBase stringByAppendingPathComponent:
+            [@"enable_" stringByAppendingString:shortName]]];
 }
 
 static long miosBootID(void) {
@@ -321,22 +326,110 @@ static void initCfprefsd(void) {
     miosDumpClassesByPrefix("CFPrefs", @"ource,omain,ontainer,ath,lush", @"cfprefsd");
 }
 
-// ---- Phase 3: securityd ---------------------------------------------------------------------------
-// The keychain access-group rewrite is the airtight-but-dangerous part (it can break keychain). It is
-// GATED behind an explicit opt-in file so this combined build is safe to install: securityd only logs
-// until you create /var/mobile/Library/Preferences/MiOS/enable_securityd. The SecItem server functions
-// are C (not ObjC), so they need libundirect to resolve on this iOS — we check/log its availability
-// here and wire the actual rewrite once confirmed.
+// ---- Phase 3: securityd — per-container keychain (faithful Crane mechanism) ------------------------
+// Resolve the private SecItem server functions via MSGetImageByName/MSFindSymbol (what Crane uses) and
+// hook them. In each hook, read the caller's bundle id from client->task (offset 0), look up its active
+// container, and REPLACE client->accessGroups (offset 8) with per-container-suffixed groups
+// (<group>.m_i_o_s.<uuid>), skipping Apple's shared groups. securityd already validated the client
+// before calling these, so the swap is accepted (this is Crane's "unrestrictClientInfo"). Restored
+// after the call. Offsets 0/8 are the first two pointer fields of SecurityClient (task, accessGroups)
+// per Apple's open source, so they are stable across iOS versions.
+
+// SecurityClient field access (first two fields are pointers: SecTaskRef task; CFArrayRef accessGroups;)
+#define MIOS_SC_TASK(c)   (*(SecTaskRef *)((char *)(c) + 0))
+#define MIOS_SC_AGRPS(c)  (*(CFArrayRef *)((char *)(c) + sizeof(void *)))
+
+typedef bool (*SecItemAddFn)(CFDictionaryRef, void *, CFTypeRef *, CFErrorRef *);
+typedef bool (*SecItemCopyMatchingFn)(CFDictionaryRef, void *, CFTypeRef *, CFErrorRef *);
+typedef bool (*SecItemUpdateFn)(CFDictionaryRef, CFDictionaryRef, void *, CFErrorRef *);
+typedef bool (*SecItemDeleteFn)(CFDictionaryRef, void *, CFErrorRef *);
+static SecItemAddFn          origSecItemAdd;
+static SecItemCopyMatchingFn origSecItemCopyMatching;
+static SecItemUpdateFn       origSecItemUpdate;
+static SecItemDeleteFn       origSecItemDelete;
+
+extern CFStringRef SecTaskCopySigningIdentifier(SecTaskRef task, CFErrorRef *error);
+
+static BOOL kcGroupIgnored(id g) {
+    static NSArray *ign; static dispatch_once_t o;
+    dispatch_once(&o, ^{ ign = @[@"apple", @"com.apple.token", @"com.apple.certificates",
+        @"com.apple.identities", @"com.apple.cfnetwork", @"com.apple.ProtectedCloudStorage",
+        @"com.apple.passd", @"com.apple.managed.vpn.shared"]; });
+    if (![g isKindOfClass:[NSString class]]) return YES;
+    if ([(NSString *)g containsString:@".m_i_o_s."]) return YES;   // never double-suffix
+    for (NSString *i in ign) if ([(NSString *)g isEqualToString:i]) return YES;
+    return NO;
+}
+
+// Active container for the SecurityClient's calling task, or nil for default (no isolation).
+static NSString *kcContainerForClient(void *client) {
+    @try {
+        SecTaskRef task = MIOS_SC_TASK(client);
+        if (!task) return nil;
+        CFStringRef sid = SecTaskCopySigningIdentifier(task, NULL);
+        if (!sid) return nil;
+        NSString *bid = (__bridge_transfer NSString *)sid;
+        return miosActiveContainerForBundle(bid);
+    } @catch (__unused id e) { return nil; }
+}
+
+static CFArrayRef kcSuffixedGroups(CFArrayRef orig, NSString *uuid) {
+    NSArray *a = (__bridge NSArray *)orig;
+    if (![a isKindOfClass:[NSArray class]] || a.count == 0) return NULL;
+    NSMutableArray *out = [NSMutableArray arrayWithCapacity:a.count];
+    for (id g in a) {
+        if (kcGroupIgnored(g)) [out addObject:g];
+        else [out addObject:[NSString stringWithFormat:@"%@.m_i_o_s.%@", g, uuid]];
+    }
+    return (__bridge_retained CFArrayRef)out;
+}
+
+#define MIOS_SEC_WRAP(call) \
+    do { \
+        if (miosDisabled()) break; \
+        NSString *uuid = kcContainerForClient(client); \
+        if (!uuid) break; \
+        CFArrayRef saved = MIOS_SC_AGRPS(client); \
+        CFArrayRef repl = kcSuffixedGroups(saved, uuid); \
+        if (repl) { \
+            MIOS_SC_AGRPS(client) = repl; \
+            bool _r = call; \
+            MIOS_SC_AGRPS(client) = saved; CFRelease(repl); \
+            return _r; \
+        } \
+    } while (0)
+
+static bool new_SecItemCopyMatching(CFDictionaryRef q, void *client, CFTypeRef *r, CFErrorRef *e) {
+    @try { MIOS_SEC_WRAP(origSecItemCopyMatching(q, client, r, e)); } @catch (__unused id ex) {}
+    return origSecItemCopyMatching(q, client, r, e);
+}
+static bool new_SecItemAdd(CFDictionaryRef a, void *client, CFTypeRef *r, CFErrorRef *e) {
+    @try { MIOS_SEC_WRAP(origSecItemAdd(a, client, r, e)); } @catch (__unused id ex) {}
+    return origSecItemAdd(a, client, r, e);
+}
+static bool new_SecItemUpdate(CFDictionaryRef q, CFDictionaryRef a, void *client, CFErrorRef *e) {
+    @try { MIOS_SEC_WRAP(origSecItemUpdate(q, a, client, e)); } @catch (__unused id ex) {}
+    return origSecItemUpdate(q, a, client, e);
+}
+static bool new_SecItemDelete(CFDictionaryRef q, void *client, CFErrorRef *e) {
+    @try { MIOS_SEC_WRAP(origSecItemDelete(q, client, e)); } @catch (__unused id ex) {}
+    return origSecItemDelete(q, client, e);
+}
+
 static void initSecurityd(void) {
-    supLog(@"securityd", @"[init] MiOSSupport up in securityd (discovery only)");
-    BOOL optIn = [[NSFileManager defaultManager] fileExistsAtPath:
-                  [kMiOSBase stringByAppendingPathComponent:@"enable_securityd"]];
-    void *lu = dlopen("/var/jb/usr/lib/libundirect.dylib", RTLD_NOW);
-    if (!lu) lu = dlopen("/usr/lib/libundirect.dylib", RTLD_NOW);
-    void *find = lu ? dlsym(lu, "libundirect_find") : NULL;
-    supLog(@"securityd", [NSString stringWithFormat:@"libundirect=%@ libundirect_find=%@ optIn=%d",
-           lu ? @"yes" : @"no", find ? @"yes" : @"no", optIn]);
-    // No SecItem hook installed in this build (needs confirmed libundirect API + opt-in) → safe.
+    supLog(@"securityd", @"[init] MiOSSupport up in securityd");
+    MSImageRef img = MSGetImageByName("/usr/libexec/securityd");
+    if (!img) { supLog(@"securityd", @"securityd image NOT found — no hook (fail-safe)"); return; }
+    void *cm = MSFindSymbol(img, "__SecItemCopyMatching");
+    void *ad = MSFindSymbol(img, "__SecItemAdd");
+    void *dl = MSFindSymbol(img, "__SecItemDelete");
+    void *up = MSFindSymbol(img, "__SecItemUpdate");
+    supLog(@"securityd", [NSString stringWithFormat:@"MSFindSymbol cm=%p ad=%p dl=%p up=%p", cm, ad, dl, up]);
+    if (cm) MSHookFunction(cm, (void *)new_SecItemCopyMatching, (void **)&origSecItemCopyMatching);
+    if (ad) MSHookFunction(ad, (void *)new_SecItemAdd,          (void **)&origSecItemAdd);
+    if (dl) MSHookFunction(dl, (void *)new_SecItemDelete,       (void **)&origSecItemDelete);
+    if (up) MSHookFunction(up, (void *)new_SecItemUpdate,       (void **)&origSecItemUpdate);
+    supLog(@"securityd", @"[init] SecItem hooks installed (per-container access-group isolation)");
 }
 
 // ---- Phase 4: lsd (IDFV per container) ------------------------------------------------------------
@@ -352,14 +445,17 @@ static void initLsd(void) {
         @try {
             // --- anti-brick gates (any one of them → install nothing) ---
             if (miosSafeMode()) return;                 // Volume-Up safe boot → always clean
-            if (!miosDaemonOptIn()) return;             // off by default; enable_daemons must exist
-            if (!miosWatchdogArmOrDisable()) return;    // last boot failed → self-disable this boot
 
             char buf[1024]; buf[0] = 0;
             uint32_t sz = sizeof(buf);
             extern int _NSGetExecutablePath(char *, uint32_t *);
             NSString *exe = (_NSGetExecutablePath(buf, &sz) == 0) ? @(buf) : @"";
             NSString *name = exe.lastPathComponent;
+            if (![name isEqualToString:@"containermanagerd"] && ![name isEqualToString:@"cfprefsd"] &&
+                ![name isEqualToString:@"securityd"] && ![name isEqualToString:@"lsd"]) return;
+
+            if (!miosDaemonEnabled(name)) return;       // off by default (master or per-daemon opt-in)
+            if (!miosWatchdogArmOrDisable()) return;    // last boot failed → self-disable this boot
 
             if ([name isEqualToString:@"containermanagerd"])      initContainermanagerd();
             else if ([name isEqualToString:@"cfprefsd"])          initCfprefsd();

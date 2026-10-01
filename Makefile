@@ -15,7 +15,7 @@ MiOSTweak_FRAMEWORKS = Foundation CoreFoundation UIKit CoreLocation Security Cor
 # daemons named in layout/.../MiOSSupport.plist. ARC off-safe: uses manual @autoreleasepool.
 MiOSSupport_FILES = $(wildcard MiOSSupport/*.x) $(wildcard MiOSSupport/*.m) $(wildcard MiOSSupport/*.c)
 MiOSSupport_CFLAGS = -fobjc-arc -Wno-deprecated-declarations
-MiOSSupport_FRAMEWORKS = Foundation CoreFoundation
+MiOSSupport_FRAMEWORKS = Foundation CoreFoundation Security
 
 APPLICATION_NAME = MiOS
 MiOS_FILES = $(wildcard MiOSApp/*.m) $(wildcard MiOSApp/Controllers/*.m) $(wildcard MiOSApp/Views/*.m) $(wildcard MiOSApp/Models/*.m) $(wildcard MiOSApp/Utils/*.m) $(wildcard MiOSApp/UI/*.m)
