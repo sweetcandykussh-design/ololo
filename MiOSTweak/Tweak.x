@@ -677,9 +677,11 @@ static void *new_dlsym(void *handle, const char *symbol) {
     return orig_dlsym ? orig_dlsym(handle, symbol) : NULL;
 }
 
-// Rebind the MGCopyAnswer import pointer to ours ONLY in the main executable and FBSharedFramework —
-// never in CoreTelephony, Shadow, or other system images, so nothing outside the app is affected and
-// the real libMobileGestalt function is left untouched.
+// Rebind the MGCopyAnswer import pointer to ours ONLY in the app's own binaries — the main executable
+// and any framework bundled inside the .app (which includes FBSharedFramework). System frameworks
+// (CoreTelephony, Shadow, the shared cache) are matched by neither test and left untouched, so nothing
+// outside the app is affected and the real libMobileGestalt function is never patched. fishhook only
+// rewrites import pointers inside THIS process, so other apps/daemons are unaffected either way.
 static void miosRebindMGInAppImages(void) {
     struct rebinding rb = { "MGCopyAnswer", (void *)mios_MGCopyAnswer, NULL };
     uint32_t count = _dyld_image_count();
@@ -688,8 +690,8 @@ static void miosRebindMGInAppImages(void) {
         const char *name = _dyld_get_image_name(i);
         if (!hdr) continue;
         BOOL isMain = (hdr->filetype == MH_EXECUTE);
-        BOOL isFBShared = (name != NULL && strstr(name, "FBSharedFramework") != NULL);
-        if (isMain || isFBShared) {
+        BOOL isAppImage = (name != NULL && strstr(name, ".app/") != NULL);  // main exe + embedded frameworks
+        if (isMain || isAppImage) {
             rebind_symbols_image((void *)hdr, _dyld_get_image_vmaddr_slide(i), &rb, 1);
         }
     }
@@ -939,12 +941,13 @@ static void miosRedirectLog(NSString *line) {
                 if (mgH) gRealMGCopyAnswer = (CFTypeRef(*)(CFStringRef))dlsym(mgH, "MGCopyAnswer");
                 MSHookFunction((void *)dlsym, (void *)new_dlsym, (void **)&orig_dlsym);
 
-                // Instagram (and the FBSharedFramework it embeds) bind MGCopyAnswer directly in their
-                // import tables, bypassing the dlsym hook above. Rebind that import pointer to ours
-                // with fishhook — this only rewrites Instagram's own __DATA/__DATA_CONST pointers and
-                // never touches the real libMobileGestalt function, so CoreTelephony stays intact.
-                // Scoped to Instagram, where the direct-binding path is what leaks the real device.
-                if (gRealMGCopyAnswer && [gBundleID isEqualToString:@"com.burbn.instagram"]) {
+                // Many apps bind MGCopyAnswer directly in their import tables, bypassing the dlsym hook
+                // above. Rebind that import pointer to ours with fishhook, in EVERY container app (not
+                // just Instagram) so the spoofed device shows in the app's own UI. Scoped to the app's
+                // own binaries only (main exe + embedded frameworks) — the real libMobileGestalt and
+                // system frameworks like CoreTelephony are never touched, and fishhook is per-process.
+                // Honour the kill-switch so it can be turned off from Filza without a reboot.
+                if (gRealMGCopyAnswer && !miosRedirectDisabled()) {
                     miosRebindMGInAppImages();
                 }
             }
