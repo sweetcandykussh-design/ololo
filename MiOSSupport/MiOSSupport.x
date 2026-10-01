@@ -24,6 +24,7 @@
 #import <Security/Security.h>
 #import <dlfcn.h>
 #import <stdlib.h>
+#import <unistd.h>
 #import <sys/sysctl.h>
 #import <sys/time.h>
 
@@ -501,9 +502,6 @@ static void initLsd(void) {
 %ctor {
     @autoreleasepool {
         @try {
-            // --- anti-brick gates (any one of them → install nothing) ---
-            if (miosSafeMode()) return;                 // Volume-Up safe boot → always clean
-
             char buf[1024]; buf[0] = 0;
             uint32_t sz = sizeof(buf);
             extern int _NSGetExecutablePath(char *, uint32_t *);
@@ -512,8 +510,14 @@ static void initLsd(void) {
             if (![name isEqualToString:@"containermanagerd"] && ![name isEqualToString:@"cfprefsd"] &&
                 ![name isEqualToString:@"securityd"] && ![name isEqualToString:@"lsd"]) return;
 
-            if (!miosDaemonEnabled(name)) return;       // off by default (master or per-daemon opt-in)
-            if (!miosWatchdogArmOrDisable()) return;    // last boot failed → self-disable this boot
+            // Unconditional proof-of-injection log — written the moment the dylib loads into the daemon,
+            // BEFORE any gate, so we can tell "not injected" from "gated out" and see WHY it stops.
+            supLog(name, [NSString stringWithFormat:@"[ctor] loaded in %@ (pid %d)", name, getpid()]);
+
+            // --- anti-brick gates (any one of them → install nothing) ---
+            if (miosSafeMode())          { supLog(name, @"[ctor] safe mode → skip"); return; }
+            if (!miosDaemonEnabled(name)){ supLog(name, @"[ctor] not enabled (no enable_daemons/enable_<name>) → skip"); return; }
+            if (!miosWatchdogArmOrDisable()) { supLog(name, @"[ctor] watchdog: prior boot failed → skip"); return; }
 
             if ([name isEqualToString:@"containermanagerd"])      initContainermanagerd();
             else if ([name isEqualToString:@"cfprefsd"])          initCfprefsd();
