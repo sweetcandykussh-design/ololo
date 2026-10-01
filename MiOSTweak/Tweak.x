@@ -756,26 +756,42 @@ static void *new_dlsym(void *handle, const char *symbol) {
     return orig_dlsym ? orig_dlsym(handle, symbol) : NULL;
 }
 
-// Rebind the MGCopyAnswer import pointer to ours ONLY in the app's own binaries — the main executable
-// and any framework bundled inside the .app (which includes FBSharedFramework). System frameworks
-// (CoreTelephony, Shadow, the shared cache) are matched by neither test and left untouched, so nothing
-// outside the app is affected and the real libMobileGestalt function is never patched. fishhook only
-// rewrites import pointers inside THIS process, so other apps/daemons are unaffected either way.
-// Rebind the MGCopyAnswer import pointer to ours in EVERY image — present AND future. fishhook's
-// rebind_symbols() rebinds all currently-loaded images and registers a dyld add-image callback, so a
-// framework loaded LATER (a Settings pane, an Instagram module loaded on demand) is rebound too. Our
-// previous one-shot scan in the constructor missed those late images, which is why Settings' "Model
-// Name" (read from a system framework bound after launch) and some app reads slipped through. This is
-// the same technique shipping model-spoofers (e.g. CyPwn FakeModel) use. It stays safe: fishhook only
-// swaps the caller's import slot — it never patches libMobileGestalt's code — and mios_MGCopyAnswer
-// passes every key we don't spoof straight through to the real function, so CoreTelephony's baseband
-// probes and jailbreak-bypass checks keep seeing real values.
-static void miosInstallMGRebind(void) {
-    static struct rebinding rb;   // keep alive for the lifetime of the add-image callback
-    rb.name = "MGCopyAnswer";
-    rb.replacement = (void *)mios_MGCopyAnswer;
-    rb.replaced = NULL;
-    rebind_symbols(&rb, 1);
+// Rebind the MGCopyAnswer import pointer to ours.
+//
+// CONTAINER apps (allImages == NO): rebind ONLY the app's own binaries — the main executable and any
+// framework bundled inside the .app (which includes FBSharedFramework). System frameworks
+// (CoreTelephony, Shadow, the shared cache) are matched by neither test and left untouched. This is
+// critical: feeding a spoofed ProductType/ProductVersion to a SYSTEM framework inside the app (e.g.
+// CoreTelephony during its init) sends it down an incompatible code path and crashes the app — the
+// same class of failure as spoofing the kern.* sysctls. This is the tested, non-crashing behavior.
+//
+// SYSTEM-spoof mode (allImages == YES, Settings only): the About pane reads the model name from a
+// system framework, so we must rebind every image — current and future (via fishhook's add-image
+// callback). We accept the wider surface only here, where there is no app to crash.
+//
+// fishhook only swaps the caller's import slot (never patches libMobileGestalt's code), and
+// mios_MGCopyAnswer passes every key we don't spoof straight through to the real function.
+static void miosRebindMG(BOOL allImages) {
+    if (allImages) {
+        static struct rebinding rb;   // keep alive for the add-image callback (future images)
+        rb.name = "MGCopyAnswer";
+        rb.replacement = (void *)mios_MGCopyAnswer;
+        rb.replaced = NULL;
+        rebind_symbols(&rb, 1);
+        return;
+    }
+    struct rebinding rb = { "MGCopyAnswer", (void *)mios_MGCopyAnswer, NULL };
+    uint32_t count = _dyld_image_count();
+    for (uint32_t i = 0; i < count; i++) {
+        const struct mach_header *hdr = _dyld_get_image_header(i);
+        const char *name = _dyld_get_image_name(i);
+        if (!hdr) continue;
+        BOOL isMain = (hdr->filetype == MH_EXECUTE);
+        BOOL isAppImage = (name != NULL && strstr(name, ".app/") != NULL);  // main exe + embedded frameworks
+        if (isMain || isAppImage) {
+            rebind_symbols_image((void *)hdr, _dyld_get_image_vmaddr_slide(i), &rb, 1);
+        }
+    }
 }
 
 // MARK: - Derived unique-device identifiers (stable per container)
@@ -1047,7 +1063,9 @@ static void miosRedirectLog(NSString *line) {
                 // system frameworks like CoreTelephony are never touched, and fishhook is per-process.
                 // Honour the kill-switch so it can be turned off from Filza without a reboot.
                 if (gRealMGCopyAnswer && !miosRedirectDisabled()) {
-                    miosInstallMGRebind();
+                    // Container apps: app images only (never touch system frameworks → no crash).
+                    // Settings (system spoof): all images, so About's model name is covered.
+                    miosRebindMG(systemSpoofMode);
                 }
             }
         }
