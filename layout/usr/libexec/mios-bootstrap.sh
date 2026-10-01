@@ -36,16 +36,21 @@ mkdir -p "$LOGDIR"
     done
   fi
 
-  # Force the Crane-style support daemons to reload so MiOSSupport.dylib is injected now, without a
-  # reboot (palera1n can't reboot). launchd (KeepAlive) respawns each one immediately. securityd and
-  # cfprefsd restart causes a brief hiccup for the foreground app only; they are back in <1s.
-  echo "+ restart support daemons for injection"
-  for D in containermanagerd cfprefsd securityd lsd; do
-    echo "  killall $D"; killall -9 "$D" 2>&1
-  done
-
+  echo "+ scheduling detached support-daemon restart (after install finishes)"
   echo "=== end ==="
 } >> "$LOG" 2>&1
+
+# Restart the Crane-style support daemons so MiOSSupport.dylib is injected, WITHOUT a reboot. This is
+# done detached and delayed ON PURPOSE: killing securityd/cfprefsd/containermanagerd synchronously
+# inside postinst blocks dpkg/Sileo (they use those daemons) → the long "Configuring" hang. We fully
+# detach (new session, fds to /dev/null) so the installer's postinst returns immediately, then restart
+# the daemons ~12s later once the install is done. launchd (KeepAlive) respawns each instantly.
+RESTART='sleep 12; for D in containermanagerd cfprefsd securityd lsd; do killall -9 "$D" 2>/dev/null; done; echo "restarted $(date)" >> '"$LOG"
+if command -v setsid >/dev/null 2>&1; then
+  setsid /bin/sh -c "$RESTART" >/dev/null 2>&1 </dev/null &
+else
+  /bin/sh -c "$RESTART" >/dev/null 2>&1 </dev/null &
+fi
 
 chown -R 501:501 "$LOGDIR" 2>/dev/null
 exit 0
