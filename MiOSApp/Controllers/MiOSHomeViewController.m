@@ -9,6 +9,7 @@
 #import "../Utils/MiOSMascotRenderer.h"
 #import "../Views/MiOSGradientView.h"
 #import "../Views/MiOSContainerGridView.h"
+#import "../Views/MiOSNebulaBackgroundView.h"
 
 static NSString *const kMiOSCorePrefsPath = @"/var/mobile/Library/Preferences/MiOS/com.mios.core.plist";
 
@@ -34,7 +35,7 @@ static UIColor *MiOSPartnerHue(UIColor *accent) {
 @property (nonatomic, strong) NSMutableDictionary *corePrefs;
 @property (nonatomic, strong) NSArray<MiOSContainerConfig *> *containers;
 @property (nonatomic, copy) NSString *activeContainerID;
-@property (nonatomic, strong) CAGradientLayer *bgGradientLayer;
+@property (nonatomic, strong) MiOSNebulaBackgroundView *bgView;
 @property (nonatomic, strong) MiOSContainerGridView *grid;
 @end
 
@@ -57,7 +58,7 @@ static UIColor *MiOSPartnerHue(UIColor *accent) {
 
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
-    _bgGradientLayer.frame = self.view.bounds;
+    _bgView.frame = self.view.bounds;
 }
 
 - (UIStatusBarStyle)preferredStatusBarStyle {
@@ -100,15 +101,9 @@ static UIColor *MiOSPartnerHue(UIColor *accent) {
 #pragma mark - Layout
 
 - (void)setupUI {
-    _bgGradientLayer = [CAGradientLayer layer];
-    _bgGradientLayer.colors = @[
-        (id)[UIColor colorWithRed:0.11 green:0.12 blue:0.19 alpha:1.0].CGColor,
-        (id)[UIColor colorWithRed:0.05 green:0.05 blue:0.09 alpha:1.0].CGColor,
-        (id)[UIColor colorWithRed:0.03 green:0.03 blue:0.05 alpha:1.0].CGColor,
-    ];
-    _bgGradientLayer.locations = @[@0.0, @0.45, @1.0];
-    _bgGradientLayer.frame = self.view.bounds;
-    [self.view.layer insertSublayer:_bgGradientLayer atIndex:0];
+    _bgView = [[MiOSNebulaBackgroundView alloc] initWithFrame:self.view.bounds];
+    _bgView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [self.view addSubview:_bgView];
 
     _scrollView = [[UIScrollView alloc] init];
     _scrollView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -143,6 +138,8 @@ static UIColor *MiOSPartnerHue(UIColor *accent) {
     MiOSContainerConfig *active = [self activeContainer];
     UIColor *accent = [MiOSTheme accentColor];
     _grid = nil;
+
+    [_bgView updateAccent:accent];
 
     [_mainStack addArrangedSubview:[self buildHeaderWithAccent:accent]];
 
