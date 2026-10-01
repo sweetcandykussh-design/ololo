@@ -724,14 +724,67 @@ static void miosBuildSpoofCache(void) {
     }
 }
 
-// MARK: - Fresh-container isolation
+// MARK: - App Group redirection (per-container, in-process — Crane-style but daemon-free)
 //
-// We deliberately do NOT wipe the App Group in-process. The App Group container is SHARED across all
-// of an app's family apps (Instagram / Facebook / Threads / Messenger) and holds the logged-in
-// session, so wiping it would log the user out and clobber sibling apps' data. Instead the privileged
-// daemon (miosd, see switchGroupContainers) gives each logical container its OWN App Group container
-// at the system level via MCMSharedDataContainer + replaceContainer:, so every container keeps its own
-// device-id, header and session with nothing deleted and no other app touched.
+// Crane isolates the App Group by redirecting container-path resolution inside system daemons
+// (cfprefsd/containermanagerd). We achieve the same per-container isolation entirely IN-PROCESS, which
+// is safe (no system-daemon hooks → cannot destabilise the system or panic the kernel like the
+// replaceContainer path did): we rewrite the app's own App Group accesses to a per-container namespace.
+//
+//   - NSUserDefaults(suiteName:"group.X")      -> suite "group.X__mios_<uuid>"
+//   - containerURLForSecurityApplicationGroupIdentifier:"group.X" -> <group>/___MiOS_Containers/<uuid>
+//
+// So each logical container sees its OWN empty group state on first use: Instagram regenerates its
+// device-id/header and registers as the spoofed device (the reason it still showed the old device was
+// that every container shared one real group). The REAL group is never modified, so other apps and the
+// user's existing data are untouched, and no logout happens (auth lives in the private container).
+//
+// Kill-switch: create /var/mobile/Library/Preferences/MiOS/disable (e.g. in Filza) to turn redirection
+// off instantly with no reboot. Every hook is fail-safe: on any uncertainty it returns the original.
+
+static BOOL gGroupRedirectActive = NO;
+
+static BOOL miosRedirectDisabled(void) {
+    static BOOL disabled = NO;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        disabled = [[NSFileManager defaultManager] fileExistsAtPath:
+            @"/var/mobile/Library/Preferences/MiOS/disable"];
+    });
+    return disabled;
+}
+
+%group GroupRedirectHooks
+
+%hook NSUserDefaults
+
+- (instancetype)initWithSuiteName:(NSString *)suiteName {
+    if (gGroupRedirectActive && gContainerUUID.length > 0 &&
+        [suiteName isKindOfClass:[NSString class]] &&
+        [suiteName hasPrefix:@"group."] && ![suiteName containsString:@"__mios_"]) {
+        NSString *scoped = [NSString stringWithFormat:@"%@__mios_%@", suiteName, gContainerUUID];
+        return %orig(scoped);
+    }
+    return %orig;
+}
+
+%end
+
+%hook NSFileManager
+
+- (NSURL *)containerURLForSecurityApplicationGroupIdentifier:(NSString *)groupID {
+    NSURL *real = %orig;
+    if (!gGroupRedirectActive || gContainerUUID.length == 0 || !real) return real;
+    NSURL *scoped = [[real URLByAppendingPathComponent:@"___MiOS_Containers" isDirectory:YES]
+                          URLByAppendingPathComponent:gContainerUUID isDirectory:YES];
+    [[NSFileManager defaultManager] createDirectoryAtURL:scoped withIntermediateDirectories:YES
+                                              attributes:nil error:nil];
+    return scoped;
+}
+
+%end
+
+%end // GroupRedirectHooks
 
 // MARK: - Constructor
 
@@ -773,6 +826,13 @@ static void miosBuildSpoofCache(void) {
         miosInitKeychainNamespace();
 
         if (!gSpoof) gSpoof = @{};
+
+        // Per-container App Group redirection (in-process, Crane-style). Gives this container its own
+        // group state so the app registers as the spoofed device. Kill-switch + fail-safe above.
+        gGroupRedirectActive = (gContainerUUID.length > 0) && !miosRedirectDisabled();
+        if (gGroupRedirectActive) {
+            %init(GroupRedirectHooks);
+        }
 
         // Precompute every C-hook value NOW (ObjC is safe here), so the low-level hooks never allocate.
         miosBuildSpoofCache();
