@@ -26,7 +26,9 @@ extern char **environ;
 @property (readonly, nonatomic) NSURL *url;
 - (instancetype)initWithIdentifier:(NSString *)identifier path:(NSString *)path
                 uniquePathComponent:(NSString *)unique uuid:(NSUUID *)uuid
-                personaUniqueString:(NSString *)persona error:(NSError **)error;
+                personaUniqueString:(NSString *)persona error:(NSError **)error;   // iOS 17+
+- (instancetype)initWithIdentifier:(NSString *)identifier path:(NSString *)path
+                uniquePathComponent:(NSString *)unique uuid:(NSUUID *)uuid error:(NSError **)error; // iOS 16-
 - (BOOL)recreateDefaultStructureWithError:(NSError **)error;
 - (id)destroyContainerWithCompletion:(id)completion;
 @end
@@ -221,16 +223,42 @@ static MCMContainer *currentContainer(NSString *bid, BOOL create) {
     return send(cls, @selector(containerWithIdentifier:createIfNecessary:existed:error:), bid, create, &existed, &err);
 }
 
+// MCMContainer's designated initializer differs by iOS version: iOS 17 added a personaUniqueString:
+// argument that iOS 16 and earlier do not have (this is what crashed miosd with an unrecognized
+// selector on iOS 16.7). Pick whichever initializer the class actually implements; if neither matches,
+// log the real init selectors so we can adapt.
+static MCMContainer *miosMakeContainer(Class cls, NSString *ident, NSString *path, NSString *uuidStr) {
+    if (!cls) return nil;
+    NSUUID *uuid = [[NSUUID alloc] initWithUUIDString:uuidStr];
+    NSError *err = nil;
+    id obj = [cls alloc];
+    SEL sel6 = @selector(initWithIdentifier:path:uniquePathComponent:uuid:personaUniqueString:error:);
+    SEL sel5 = @selector(initWithIdentifier:path:uniquePathComponent:uuid:error:);
+    if ([obj respondsToSelector:sel6]) {
+        MCMContainer *(*f)(id, SEL, id, id, id, id, id, NSError **) = (void *)objc_msgSend;
+        return f(obj, sel6, ident, path, uuidStr, uuid, nil, &err);
+    }
+    if ([obj respondsToSelector:sel5]) {
+        MCMContainer *(*f)(id, SEL, id, id, id, id, NSError **) = (void *)objc_msgSend;
+        return f(obj, sel5, ident, path, uuidStr, uuid, &err);
+    }
+    unsigned int n = 0;
+    Method *list = class_copyMethodList(cls, &n);
+    for (unsigned int i = 0; i < n; i++) {
+        const char *nm = sel_getName(method_getName(list[i]));
+        if (strstr(nm, "initWith")) dlog(@"[mcm-sel] %s -> %s", class_getName(cls), nm);
+    }
+    if (list) free(list);
+    return nil;
+}
+
 // Build a container object for a specific UUID/path (constructing its on-disk structure if new).
 static MCMContainer *containerForUUID(NSString *bid, NSString *uuidStr, BOOL createStructure) {
     Class cls = MCMAppDataClass();
     if (!cls) return nil;
-    NSUUID *uuid = [[NSUUID alloc] initWithUUIDString:uuidStr];
     NSString *path = [kAppDataRoot stringByAppendingPathComponent:uuidStr];
-    NSError *err = nil;
-    MCMContainer *c = [[cls alloc] initWithIdentifier:bid path:path uniquePathComponent:uuidStr
-                                                 uuid:uuid personaUniqueString:nil error:&err];
-    if (c && createStructure) [c recreateDefaultStructureWithError:&err];
+    MCMContainer *c = miosMakeContainer(cls, bid, path, uuidStr);
+    if (c && createStructure) { NSError *err = nil; [c recreateDefaultStructureWithError:&err]; }
     return c;
 }
 
@@ -249,12 +277,9 @@ static MCMContainer *currentGroupContainer(NSString *groupID, BOOL create) {
 static MCMContainer *groupContainerForUUID(NSString *groupID, NSString *uuidStr, BOOL createStructure) {
     Class cls = MCMSharedDataClass();
     if (!cls) return nil;
-    NSUUID *uuid = [[NSUUID alloc] initWithUUIDString:uuidStr];
     NSString *path = [kSharedRoot stringByAppendingPathComponent:uuidStr];
-    NSError *err = nil;
-    MCMContainer *c = [[cls alloc] initWithIdentifier:groupID path:path uniquePathComponent:uuidStr
-                                                 uuid:uuid personaUniqueString:nil error:&err];
-    if (c && createStructure) [c recreateDefaultStructureWithError:&err];
+    MCMContainer *c = miosMakeContainer(cls, groupID, path, uuidStr);
+    if (c && createStructure) { NSError *err = nil; [c recreateDefaultStructureWithError:&err]; }
     return c;
 }
 
