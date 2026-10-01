@@ -446,8 +446,10 @@ static OSStatus (*orig_SecItemCopyMatching)(CFDictionaryRef, CFTypeRef *);
 static OSStatus (*orig_SecItemUpdate)(CFDictionaryRef, CFDictionaryRef);
 static OSStatus (*orig_SecItemDelete)(CFDictionaryRef);
 
-// Defined further down (in the App Group redirect section); used here for keychain diagnostics.
+// Defined further down (in the App Group redirect section); used here for keychain diagnostics and
+// for the blanket-identity-query isolation (both run before those functions are defined).
 static void miosRedirectLog(NSString *line);
+static BOOL miosRedirectDisabled(void);
 
 static NSArray *kcPrefixedKeys(void) {
     // Namespace the primary-key fields so each container sees only its own items. Account is
