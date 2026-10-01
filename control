@@ -1,0 +1,9 @@
+Package: com.mios.tweak
+Name: MiOS
+Version: 1.0.0
+Architecture: iphoneos-arm64
+Description: App containerization and GPS spoofing tweak with modern UI
+Maintainer: miOS
+Author: miOS
+Section: Tweaks
+Depends: mobilesubstrate, firmware (>= 15.0), com.opa334.libsandy
