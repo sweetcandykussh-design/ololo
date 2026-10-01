@@ -153,45 +153,81 @@ static NSURL *miosRedirectDir(NSURL *realURL, NSString *bundleID, NSString *uuid
     return [NSURL fileURLWithPath:dirPath isDirectory:YES];
 }
 
-// Read a container object's bundle identifier without compile-time headers (KVC, fail-safe).
-static NSString *miosContainerIdentifier(id container) {
+// Read a container/identity object's bundle identifier without compile-time headers (KVC, fail-safe).
+static NSString *miosContainerIdentifier(id obj) {
+    if (!obj) return nil;
     @try {
-        for (NSString *key in @[@"identifier", @"bundleIdentifier", @"metadataIdentifier"]) {
+        for (NSString *key in @[@"bundleIdentifier", @"identifier", @"metadataIdentifier",
+                                @"uniqueIdentifier", @"applicationIdentifier"]) {
             @try {
-                id v = [container valueForKey:key];
-                if ([v isKindOfClass:[NSString class]] && [(NSString *)v length]) return v;
+                id v = [obj valueForKey:key];
+                if ([v isKindOfClass:[NSString class]] && [(NSString *)v length] &&
+                    [(NSString *)v containsString:@"."]) return v;   // looks like a bundle id
             } @catch (__unused id e) {}
         }
     } @catch (__unused id e) {}
     return nil;
 }
 
+// Rewrite an MCMContainer's path ivars to the external per-container folder (Crane's mechanism). Done
+// via KVC so no compile-time headers are needed; every access is fail-safe.
+static void miosRedirectContainerObject(id container, NSString *bundleID) {
+    @try {
+        if (!container || bundleID.length == 0) return;
+        NSString *uuid = miosActiveContainerForBundle(bundleID);
+        if (!uuid) return;                               // default container → leave as-is
+        NSURL *rootURL = nil;
+        for (NSString *k in @[@"url", @"containerURL", @"containerRootURL",
+                              @"dataContainerURL", @"containerDataURL"]) {
+            @try { id v = [container valueForKey:k];
+                   if ([v isKindOfClass:[NSURL class]]) { rootURL = v; break; } } @catch (__unused id e) {}
+        }
+        if (!rootURL) return;
+        NSURL *red = miosRedirectDir(rootURL, bundleID, uuid);
+        if (!red) return;
+        BOOL any = NO;
+        for (NSString *k in @[@"url", @"containerURL", @"containerRootURL",
+                              @"dataContainerURL", @"containerDataURL"]) {
+            @try { [container setValue:red forKey:k]; any = YES; } @catch (__unused id e) {}
+        }
+        supLog(@"containermanagerd", [NSString stringWithFormat:@"redirect bid=%@ uuid=%@ set=%d %@ -> %@",
+               bundleID, uuid, any, rootURL.path, red.path]);
+    } @catch (__unused id e) {}
+}
+
 // ---- containermanagerd: discovery + guarded redirect ----------------------------------------------
 
-// Minimal declaration so Logos can install the hook. If MCMContainer does not exist on this iOS, the
-// %init below is a no-op (fail-safe).
-@interface MCMContainer : NSObject
-- (NSURL *)url;
+// Faithful Crane mechanism: hook MCMContainerFactory's createOrLookup methods, let the original create
+// the real container, then rewrite its path ivars to our external per-container folder. Two selector
+// variants cover iOS 16 and newer; Logos installs only the one(s) the class implements (fail-safe).
+@interface MCMContainerFactory : NSObject
 @end
 
-%group CMD_MCMContainer
-%hook MCMContainer
+%group CMD_MCMContainerFactory
+%hook MCMContainerFactory
 
-- (NSURL *)url {
-    NSURL *orig = %orig;
+- (id)createOrLookupContainerWithContainerIdentity:(id)identity createIfNecessary:(BOOL)c
+        transient:(BOOL)t useLocking:(BOOL)l withError:(NSError **)e {
+    id container = %orig;
     @try {
-        if (miosDisabled() || !orig) return orig;
-        NSString *bundleID = miosContainerIdentifier(self);
-        if (!bundleID) return orig;
-        NSString *uuid = miosActiveContainerForBundle(bundleID);
-        if (!uuid) return orig;                       // default container → untouched
-        NSURL *red = miosRedirectDir(orig, bundleID, uuid);
-        if (!red) return orig;
-        supLog(@"containermanagerd",
-               [NSString stringWithFormat:@"redirect url bid=%@ uuid=%@ %@ -> %@",
-                bundleID, uuid, orig.path, red.path]);
-        return red;
-    } @catch (__unused id e) { return orig; }
+        if (container && !miosDisabled()) {
+            NSString *bid = miosContainerIdentifier(identity) ?: miosContainerIdentifier(container);
+            if (bid) miosRedirectContainerObject(container, bid);
+        }
+    } @catch (__unused id ex) {}
+    return container;
+}
+
+- (id)createOrLookupContainerWithContainerIdentity:(id)identity createIfNecessary:(BOOL)c
+        transient:(BOOL)t useLocking:(BOOL)l updateLinks:(BOOL)u withError:(NSError **)e {
+    id container = %orig;
+    @try {
+        if (container && !miosDisabled()) {
+            NSString *bid = miosContainerIdentifier(identity) ?: miosContainerIdentifier(container);
+            if (bid) miosRedirectContainerObject(container, bid);
+        }
+    } @catch (__unused id ex) {}
+    return container;
 }
 
 %end
@@ -229,11 +265,11 @@ static void miosDumpMCM(void) {
 static void initContainermanagerd(void) {
     supLog(@"containermanagerd", @"[init] MiOSSupport up in containermanagerd");
     miosDumpMCM();
-    if (objc_getClass("MCMContainer")) {
-        %init(CMD_MCMContainer);
-        supLog(@"containermanagerd", @"[init] MCMContainer url hook installed");
+    if (objc_getClass("MCMContainerFactory")) {
+        %init(CMD_MCMContainerFactory);
+        supLog(@"containermanagerd", @"[init] MCMContainerFactory createOrLookup hook installed");
     } else {
-        supLog(@"containermanagerd", @"[init] MCMContainer NOT found — no hook (fail-safe)");
+        supLog(@"containermanagerd", @"[init] MCMContainerFactory NOT found — no hook (fail-safe)");
     }
 }
 
