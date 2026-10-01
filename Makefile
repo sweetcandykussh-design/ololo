@@ -31,4 +31,4 @@ include $(THEOS_MAKE_PATH)/application.mk
 include $(THEOS_MAKE_PATH)/tool.mk
 
 after-install::
-	install.exec "/var/jb/usr/bin/launchctl bootstrap system /var/jb/Library/LaunchDaemons/com.mios.containerd.plist 2>/dev/null; /var/jb/usr/bin/launchctl kickstart -k system/com.mios.containerd 2>/dev/null; /var/jb/usr/bin/killall -9 miosd 2>/dev/null; /var/jb/usr/bin/killall -9 SpringBoard 2>/dev/null; killall -9 SpringBoard 2>/dev/null"
+	install.exec "LCTL=/var/jb/usr/bin/launchctl; [ -x \"$$LCTL\" ] || LCTL=/usr/bin/launchctl; [ -x \"$$LCTL\" ] || LCTL=/bin/launchctl; PLIST=/var/jb/Library/LaunchDaemons/com.mios.containerd.plist; [ -f \"$$PLIST\" ] || PLIST=/Library/LaunchDaemons/com.mios.containerd.plist; \"$$LCTL\" enable system/com.mios.containerd 2>/dev/null; \"$$LCTL\" bootstrap system \"$$PLIST\" 2>/dev/null; \"$$LCTL\" kickstart -k system/com.mios.containerd 2>/dev/null; killall -9 miosd 2>/dev/null; killall -9 SpringBoard 2>/dev/null"
