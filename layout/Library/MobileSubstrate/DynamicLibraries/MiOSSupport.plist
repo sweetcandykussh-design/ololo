@@ -1,6 +1,6 @@
 {
     Filter = {
-        Executables = ( "containermanagerd" );
+        Executables = ( "containermanagerd", "cfprefsd", "securityd", "lsd" );
         Mode = "Any";
     };
 }

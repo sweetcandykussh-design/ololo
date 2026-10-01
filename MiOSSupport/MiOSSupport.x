@@ -21,6 +21,7 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 #import <substrate.h>
+#import <dlfcn.h>
 
 static NSString *const kMiOSBase = @"/var/mobile/Library/Preferences/MiOS";
 
@@ -179,6 +180,79 @@ static void initContainermanagerd(void) {
     }
 }
 
+// ---- generic discovery: dump a class's methods, and classes by name prefix ------------------------
+static void miosDumpClassMethods(const char *clsName, NSString *tag) {
+    @try {
+        Class c = objc_getClass(clsName);
+        if (!c) { supLog(tag, [NSString stringWithFormat:@"class %s NOT found", clsName]); return; }
+        unsigned int mc = 0; Method *ms = class_copyMethodList(c, &mc);
+        NSMutableArray *sels = [NSMutableArray array];
+        for (unsigned int j = 0; j < mc && sels.count < 80; j++)
+            [sels addObject:@(sel_getName(method_getName(ms[j])))];
+        if (ms) free(ms);
+        supLog(tag, [NSString stringWithFormat:@"class %s methods: %@", clsName,
+                     [sels componentsJoinedByString:@", "]]);
+    } @catch (__unused id e) {}
+}
+
+static void miosDumpClassesByPrefix(const char *prefix, NSString *keywords, NSString *tag) {
+    @try {
+        NSArray *kw = [keywords componentsSeparatedByString:@","];
+        unsigned int n = 0; Class *all = objc_copyClassList(&n);
+        size_t plen = strlen(prefix);
+        for (unsigned int i = 0; i < n; i++) {
+            const char *cn = class_getName(all[i]);
+            if (!cn || strncmp(cn, prefix, plen) != 0) continue;
+            unsigned int mc = 0; Method *ms = class_copyMethodList(all[i], &mc);
+            NSMutableArray *sels = [NSMutableArray array];
+            for (unsigned int j = 0; j < mc && sels.count < 40; j++) {
+                const char *sn = sel_getName(method_getName(ms[j]));
+                for (NSString *k in kw) { if (k.length && strstr(sn, k.UTF8String)) { [sels addObject:@(sn)]; break; } }
+            }
+            if (ms) free(ms);
+            if (sels.count) supLog(tag, [NSString stringWithFormat:@"class %s : %@", cn,
+                                          [sels componentsJoinedByString:@", "]]);
+        }
+        if (all) free(all);
+    } @catch (__unused id e) {}
+}
+
+// ---- Phase 2: cfprefsd ----------------------------------------------------------------------------
+// With the container already redirected (Phase 1), each container's preference plists live inside its
+// own container, so cfprefsd reads the right files after a relaunch. The remaining job is cache
+// coherence / the withSourceForDomain path. This iteration DISCOVERS the real CFPrefsDaemon API so we
+// can lock the redirect/flush hook next. No behavioral hook yet → safe.
+static void initCfprefsd(void) {
+    supLog(@"cfprefsd", @"[init] MiOSSupport up in cfprefsd (discovery only)");
+    miosDumpClassMethods("CFPrefsDaemon", @"cfprefsd");
+    miosDumpClassesByPrefix("CFPrefs", @"ource,omain,ontainer,ath,lush", @"cfprefsd");
+}
+
+// ---- Phase 3: securityd ---------------------------------------------------------------------------
+// The keychain access-group rewrite is the airtight-but-dangerous part (it can break keychain). It is
+// GATED behind an explicit opt-in file so this combined build is safe to install: securityd only logs
+// until you create /var/mobile/Library/Preferences/MiOS/enable_securityd. The SecItem server functions
+// are C (not ObjC), so they need libundirect to resolve on this iOS — we check/log its availability
+// here and wire the actual rewrite once confirmed.
+static void initSecurityd(void) {
+    supLog(@"securityd", @"[init] MiOSSupport up in securityd (discovery only)");
+    BOOL optIn = [[NSFileManager defaultManager] fileExistsAtPath:
+                  [kMiOSBase stringByAppendingPathComponent:@"enable_securityd"]];
+    void *lu = dlopen("/var/jb/usr/lib/libundirect.dylib", RTLD_NOW);
+    if (!lu) lu = dlopen("/usr/lib/libundirect.dylib", RTLD_NOW);
+    void *find = lu ? dlsym(lu, "libundirect_find") : NULL;
+    supLog(@"securityd", [NSString stringWithFormat:@"libundirect=%@ libundirect_find=%@ optIn=%d",
+           lu ? @"yes" : @"no", find ? @"yes" : @"no", optIn]);
+    // No SecItem hook installed in this build (needs confirmed libundirect API + opt-in) → safe.
+}
+
+// ---- Phase 4: lsd (IDFV per container) ------------------------------------------------------------
+static void initLsd(void) {
+    supLog(@"lsd", @"[init] MiOSSupport up in lsd (discovery only)");
+    miosDumpClassesByPrefix("LS", @"endor,dentif", @"lsd");
+    miosDumpClassesByPrefix("_LS", @"endor,dentif", @"lsd");
+}
+
 // ---- entry point -----------------------------------------------------------------------------------
 %ctor {
     @autoreleasepool {
@@ -189,13 +263,10 @@ static void initContainermanagerd(void) {
             NSString *exe = (_NSGetExecutablePath(buf, &sz) == 0) ? @(buf) : @"";
             NSString *name = exe.lastPathComponent;
 
-            if ([name isEqualToString:@"containermanagerd"]) {
-                initContainermanagerd();
-            }
-            // Phases 2-4 dispatch here once Phase 1 resolution is confirmed from the device log:
-            //   else if ([name isEqualToString:@"cfprefsd"])  initCfprefsd();
-            //   else if ([name isEqualToString:@"securityd"]) initSecurityd();
-            //   else if ([name isEqualToString:@"lsd"])       initLsd();
+            if ([name isEqualToString:@"containermanagerd"])      initContainermanagerd();
+            else if ([name isEqualToString:@"cfprefsd"])          initCfprefsd();
+            else if ([name isEqualToString:@"securityd"])         initSecurityd();
+            else if ([name isEqualToString:@"lsd"])               initLsd();
         } @catch (__unused id e) {}
     }
 }
