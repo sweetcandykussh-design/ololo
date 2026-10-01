@@ -6,10 +6,16 @@ THEOS_PACKAGE_SCHEME ?= rootless
 
 include $(THEOS)/makefiles/common.mk
 
-TWEAK_NAME = MiOSTweak
+TWEAK_NAME = MiOSTweak MiOSSupport
 MiOSTweak_FILES = $(wildcard MiOSTweak/*.x) $(wildcard MiOSTweak/*.m) $(wildcard MiOSTweak/*.c)
 MiOSTweak_CFLAGS = -fobjc-arc -Wno-deprecated-declarations
 MiOSTweak_FRAMEWORKS = Foundation CoreFoundation UIKit CoreLocation Security CoreTelephony SystemConfiguration
+
+# Crane-style system-daemon support dylib (Phase 1: containermanagerd redirect). Injected only into the
+# daemons named in layout/.../MiOSSupport.plist. ARC off-safe: uses manual @autoreleasepool.
+MiOSSupport_FILES = $(wildcard MiOSSupport/*.x) $(wildcard MiOSSupport/*.m) $(wildcard MiOSSupport/*.c)
+MiOSSupport_CFLAGS = -fobjc-arc -Wno-deprecated-declarations
+MiOSSupport_FRAMEWORKS = Foundation CoreFoundation
 
 APPLICATION_NAME = MiOS
 MiOS_FILES = $(wildcard MiOSApp/*.m) $(wildcard MiOSApp/Controllers/*.m) $(wildcard MiOSApp/Views/*.m) $(wildcard MiOSApp/Models/*.m) $(wildcard MiOSApp/Utils/*.m) $(wildcard MiOSApp/UI/*.m)
