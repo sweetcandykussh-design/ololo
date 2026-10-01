@@ -57,24 +57,42 @@ static NSString *miosActiveContainerForBundle(NSString *bundleID) {
     return uuid;
 }
 
-// Build the redirected directory for a container and make sure it exists with a stock skeleton. For
-// Phase 1 we keep it as a subfolder of the real container (guaranteed inside the app's sandbox grant);
-// moving it OUT of the default (so the default is truly empty) is a later refinement once redirect is
-// confirmed working, because an external path also needs a sandbox extension.
-static NSURL *miosRedirectDir(NSURL *realURL, NSString *uuid) {
-    if (!realURL || uuid.length == 0) return nil;
-    NSURL *dir = [[realURL URLByAppendingPathComponent:@"___MiOS_Containers" isDirectory:YES]
-                  URLByAppendingPathComponent:uuid isDirectory:YES];
+// External container storage root. Keeping containers OUTSIDE the default container is what makes the
+// default stay truly empty (no bloat, clean deletion). The app reaches this path because MiOSTweak
+// applies the libSandy "MiOS-Profile", which grants it a read-write sandbox extension for this root
+// (see layout/Library/libSandy/MiOS-Profile.plist). containermanagerd is root, so it can create here.
+static NSString *const kMiOSContainersRoot = @"/var/mobile/MiOSContainers";
+
+// Build the redirected, EXTERNAL container directory, create a stock skeleton, copy the container's MCM
+// metadata so it looks like a real container, and set mobile (501) ownership. Returns the external URL.
+static NSURL *miosRedirectDir(NSURL *realURL, NSString *bundleID, NSString *uuid) {
+    if (bundleID.length == 0 || uuid.length == 0) return nil;
+    NSString *dirPath = [[kMiOSContainersRoot stringByAppendingPathComponent:bundleID]
+                         stringByAppendingPathComponent:uuid];
     NSFileManager *fm = [NSFileManager defaultManager];
-    if (![fm fileExistsAtPath:dir.path]) {
+    NSDictionary *own = @{ NSFileOwnerAccountID: @501, NSFileGroupOwnerAccountID: @501 };
+    if (![fm fileExistsAtPath:dirPath]) {
         for (NSString *sub in @[@"Documents", @"Library", @"Library/Preferences", @"Library/Caches",
                                 @"Library/Application Support", @"Library/Cookies", @"tmp", @"StoreKit",
                                 @"SystemData"]) {
-            [fm createDirectoryAtPath:[dir.path stringByAppendingPathComponent:sub]
-          withIntermediateDirectories:YES attributes:nil error:nil];
+            [fm createDirectoryAtPath:[dirPath stringByAppendingPathComponent:sub]
+          withIntermediateDirectories:YES attributes:own error:nil];
         }
+        // Make it look like a genuine container: copy the real container's MCM metadata plist in, so
+        // anything that reads container metadata at this path sees a valid, matching record.
+        @try {
+            NSString *metaName = @".com.apple.mobile_container_manager.metadata.plist";
+            NSString *srcMeta = [realURL.path stringByAppendingPathComponent:metaName];
+            NSString *dstMeta = [dirPath stringByAppendingPathComponent:metaName];
+            if (realURL && [fm fileExistsAtPath:srcMeta] && ![fm fileExistsAtPath:dstMeta])
+                [fm copyItemAtPath:srcMeta toPath:dstMeta error:nil];
+        } @catch (__unused id e) {}
+        // Ownership on the whole tree (root-created dirs must be owned by mobile for the app to use).
+        [fm setAttributes:own ofItemAtPath:kMiOSContainersRoot error:nil];
+        [fm setAttributes:own ofItemAtPath:[kMiOSContainersRoot stringByAppendingPathComponent:bundleID] error:nil];
+        [fm setAttributes:own ofItemAtPath:dirPath error:nil];
     }
-    return dir;
+    return [NSURL fileURLWithPath:dirPath isDirectory:YES];
 }
 
 // Read a container object's bundle identifier without compile-time headers (KVC, fail-safe).
@@ -109,7 +127,7 @@ static NSString *miosContainerIdentifier(id container) {
         if (!bundleID) return orig;
         NSString *uuid = miosActiveContainerForBundle(bundleID);
         if (!uuid) return orig;                       // default container → untouched
-        NSURL *red = miosRedirectDir(orig, uuid);
+        NSURL *red = miosRedirectDir(orig, bundleID, uuid);
         if (!red) return orig;
         supLog(@"containermanagerd",
                [NSString stringWithFormat:@"redirect url bid=%@ uuid=%@ %@ -> %@",

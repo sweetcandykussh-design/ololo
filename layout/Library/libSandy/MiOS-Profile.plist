@@ -24,6 +24,14 @@
 			<key>path</key>
 			<string>/var/mobile/Containers/Data/Application</string>
 		</dict>
+		<dict>
+			<key>type</key>
+			<string>file</string>
+			<key>extension_class</key>
+			<string>com.apple.app-sandbox.read-write</string>
+			<key>path</key>
+			<string>/var/mobile/MiOSContainers</string>
+		</dict>
 	</array>
 </dict>
 </plist>
