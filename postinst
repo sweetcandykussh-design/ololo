@@ -1,9 +1,16 @@
 #!/bin/sh
-# miOS package postinst — runs as root at install time via the package manager, so the container
-# daemon comes up immediately without a reboot (palera1n/rootless can't reboot without losing JB).
+# miOS package postinst. Run the bootstrap FULLY DETACHED so the package manager's "Configuring" step
+# returns instantly. Doing launchctl / daemon work synchronously here is exactly what makes Configuring
+# hang (dpkg/Sileo wait for postinst AND its inherited fds to close). We fork the bootstrap into its own
+# session with stdio redirected away, so postinst returns immediately; launchd/daemon setup then runs a
+# moment later in the background. palera1n/rootless safe — no reboot.
 for S in /var/jb/usr/libexec/mios-bootstrap.sh /usr/libexec/mios-bootstrap.sh; do
     if [ -f "$S" ]; then
-        sh "$S"
+        if command -v setsid >/dev/null 2>&1; then
+            setsid sh "$S" >/dev/null 2>&1 </dev/null &
+        else
+            sh "$S" >/dev/null 2>&1 </dev/null &
+        fi
         break
     fi
 done
