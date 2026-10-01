@@ -55,6 +55,7 @@ static NSDictionary *gSpoof = nil;             // per-container spoof prefs
 static NSString *gContainerUUID = nil;         // seed for deterministic per-container derivation
 static NSString *gKcPrefix = nil;              // per-container keychain namespace prefix
 static BOOL gKeychainIsolation = YES;          // default on: separate keychain per container (sessions)
+static BOOL gGroupRedirectActive = NO;         // per-container App Group redirection active
 
 // Cached, allocation-free spoof values (built once in the constructor; owned for process lifetime).
 // The low-level C hooks (sysctl / uname / CNCopy...) read ONLY these, never ObjC.
@@ -445,10 +446,16 @@ static OSStatus (*orig_SecItemCopyMatching)(CFDictionaryRef, CFTypeRef *);
 static OSStatus (*orig_SecItemUpdate)(CFDictionaryRef, CFDictionaryRef);
 static OSStatus (*orig_SecItemDelete)(CFDictionaryRef);
 
+// Defined further down (in the App Group redirect section); used here for keychain diagnostics.
+static void miosRedirectLog(NSString *line);
+
 static NSArray *kcPrefixedKeys(void) {
     // Namespace the primary-key fields so each container sees only its own items. Account is
     // included so session tokens stored per-account (e.g. Instagram) stay isolated per container.
-    return @[(__bridge id)kSecAttrService, (__bridge id)kSecAttrServer, (__bridge id)kSecAttrAccount];
+    // Label is included because Facebook/Instagram key their device-id backup item by label, not
+    // service/account — without it that item stays shared and the old device-id gets restored.
+    return @[(__bridge id)kSecAttrService, (__bridge id)kSecAttrServer,
+             (__bridge id)kSecAttrAccount, (__bridge id)kSecAttrLabel];
 }
 
 // Returns a copy of dict with service-like fields prefixed; sets *modified if anything changed.
@@ -495,7 +502,24 @@ static void kcStripResult(CFTypeRef *result) {
     *result = (__bridge_retained CFTypeRef)stripped;
 }
 
+// Diagnostic: record how the app keys its keychain items (class/service/account/accessgroup/label),
+// so we can see exactly how the device-id backup is stored and whether our prefixing isolates it.
+static void miosLogKeychainAttrs(NSString *op, CFDictionaryRef dict) {
+    @try {
+        NSDictionary *d = (__bridge NSDictionary *)dict;
+        if (![d isKindOfClass:[NSDictionary class]]) return;
+        NSString *svce = d[(__bridge id)kSecAttrService];
+        NSString *acct = d[(__bridge id)kSecAttrAccount];
+        NSString *agrp = d[(__bridge id)kSecAttrAccessGroup];
+        NSString *labl = d[(__bridge id)kSecAttrLabel];
+        id cls = d[(__bridge id)kSecClass];
+        miosRedirectLog([NSString stringWithFormat:@"kc %@ class=%@ svce=%@ acct=%@ agrp=%@ labl=%@",
+            op, cls, svce ?: @"-", acct ?: @"-", agrp ?: @"-", labl ?: @"-"]);
+    } @catch (__unused id e) {}
+}
+
 static OSStatus new_SecItemAdd(CFDictionaryRef attributes, CFTypeRef *result) {
+    if (gGroupRedirectActive) miosLogKeychainAttrs(@"add", attributes);
     BOOL modified = NO;
     NSDictionary *copy = kcApplyPrefix(attributes, &modified);
     if (!modified) return orig_SecItemAdd(attributes, result);
@@ -741,8 +765,6 @@ static void miosBuildSpoofCache(void) {
 //
 // Kill-switch: create /var/mobile/Library/Preferences/MiOS/disable (e.g. in Filza) to turn redirection
 // off instantly with no reboot. Every hook is fail-safe: on any uncertainty it returns the original.
-
-static BOOL gGroupRedirectActive = NO;
 
 static BOOL miosRedirectDisabled(void) {
     static BOOL disabled = NO;
