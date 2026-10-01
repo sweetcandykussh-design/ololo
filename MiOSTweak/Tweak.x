@@ -539,48 +539,6 @@ static void miosInitKeychainNamespace(void) {
     MSHookFunction((void *)SecItemDelete, (void *)new_SecItemDelete, (void **)&orig_SecItemDelete);
 }
 
-// Delete ONLY this container's namespaced keychain items, leaving the host app's items and every
-// other container's items untouched. We go through the ORIGINAL SecItem functions so we see the raw,
-// still-prefixed attributes and match on gKcPrefix ourselves (a blanket delete-by-class would wipe
-// across containers, which is exactly the isolation leak we are trying to avoid). For a brand-new
-// container nothing matches, so this is a safe no-op; it only bites when a UUID is reused/reset.
-static void miosPurgeContainerKeychain(void) {
-    if (gKcPrefix.length == 0 || !orig_SecItemCopyMatching || !orig_SecItemDelete) return;
-    NSArray *classes = @[(__bridge id)kSecClassGenericPassword,
-                         (__bridge id)kSecClassInternetPassword,
-                         (__bridge id)kSecClassCertificate,
-                         (__bridge id)kSecClassKey,
-                         (__bridge id)kSecClassIdentity];
-    for (id cls in classes) {
-        NSDictionary *query = @{
-            (__bridge id)kSecClass:            cls,
-            (__bridge id)kSecReturnAttributes: (__bridge id)kCFBooleanTrue,
-            (__bridge id)kSecMatchLimit:       (__bridge id)kSecMatchLimitAll,
-        };
-        CFTypeRef result = NULL;
-        OSStatus st = orig_SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
-        if (st != errSecSuccess || !result) { if (result) CFRelease(result); continue; }
-        NSArray *items = [(__bridge id)result isKindOfClass:[NSArray class]] ? (__bridge NSArray *)result : @[];
-        for (NSDictionary *attrs in items) {
-            if (![attrs isKindOfClass:[NSDictionary class]]) continue;
-            BOOL mine = NO;
-            for (id key in kcPrefixedKeys()) {
-                id v = attrs[key];
-                if ([v isKindOfClass:[NSString class]] && [v hasPrefix:gKcPrefix]) { mine = YES; break; }
-            }
-            if (!mine) continue;
-            NSMutableDictionary *del = [NSMutableDictionary dictionary];
-            del[(__bridge id)kSecClass] = cls;
-            for (id key in kcPrefixedKeys()) {
-                id v = attrs[key];
-                if ([v isKindOfClass:[NSString class]]) del[key] = v;
-            }
-            orig_SecItemDelete((__bridge CFDictionaryRef)del);
-        }
-        CFRelease(result);
-    }
-}
-
 
 // MARK: - Low-level C hooks (allocation-free)
 //
@@ -746,154 +704,14 @@ static void miosBuildSpoofCache(void) {
     }
 }
 
-// MARK: - Fresh-container reset: wipe cached App Group state (device-id/header) once per container
+// MARK: - Fresh-container isolation
 //
-// Instagram (and other apps) cache a persistent device-id + device header (User-Agent) in their
-// App Group *shared* container, which lives outside the data container and survives container
-// recreation. On the FIRST launch of a container we clear that group state so the app re-registers
-// as the spoofed device instead of re-using the old cached one. Runs in-process (no daemon needed).
-
-#define MIOS_CS_EMBEDDED_SIGNATURE    0xfade0cc0
-#define MIOS_CS_EMBEDDED_ENTITLEMENTS 0xfade7171
-
-static NSData *miosReadAt(NSFileHandle *fh, unsigned long long off, unsigned long long len) {
-    @try { [fh seekToFileOffset:off]; return [fh readDataOfLength:(NSUInteger)len]; }
-    @catch (__unused id e) { return nil; }
-}
-
-static NSArray<NSString *> *miosSelfAppGroups(void) {
-    NSString *exe = [[NSBundle mainBundle] executablePath];
-    NSFileHandle *fh = exe ? [NSFileHandle fileHandleForReadingAtPath:exe] : nil;
-    if (!fh) return @[];
-    NSArray *result = @[];
-    @try {
-        unsigned long long sliceOff = 0;
-        NSData *m = miosReadAt(fh, 0, 4);
-        if (m.length < 4) { [fh closeFile]; return @[]; }
-        uint32_t magic = *(const uint32_t *)m.bytes;
-        if (magic == FAT_MAGIC || magic == FAT_CIGAM) {
-            NSData *fhd = miosReadAt(fh, 0, sizeof(struct fat_header));
-            uint32_t nfat = OSSwapBigToHostInt32(((const struct fat_header *)fhd.bytes)->nfat_arch);
-            NSData *archs = miosReadAt(fh, sizeof(struct fat_header), nfat * sizeof(struct fat_arch));
-            const struct fat_arch *a = (const struct fat_arch *)archs.bytes;
-            for (uint32_t i = 0; i < nfat; i++) {
-                if (OSSwapBigToHostInt32(a[i].cputype) == CPU_TYPE_ARM64) { sliceOff = OSSwapBigToHostInt32(a[i].offset); break; }
-            }
-            if (!sliceOff && nfat) sliceOff = OSSwapBigToHostInt32(a[0].offset);
-            NSData *m2 = miosReadAt(fh, sliceOff, 4);
-            magic = m2.length >= 4 ? *(const uint32_t *)m2.bytes : 0;
-        }
-        if (magic != MH_MAGIC_64 && magic != MH_CIGAM_64) { [fh closeFile]; return @[]; }
-        NSData *hd = miosReadAt(fh, sliceOff, sizeof(struct mach_header_64));
-        const struct mach_header_64 *hdr = (const struct mach_header_64 *)hd.bytes;
-        uint32_t ncmds = hdr->ncmds, sizeofcmds = hdr->sizeofcmds;
-        NSData *cmds = miosReadAt(fh, sliceOff + sizeof(struct mach_header_64), sizeofcmds);
-        const uint8_t *p = cmds.bytes, *end = p + cmds.length;
-        uint32_t csOff = 0, csSize = 0;
-        for (uint32_t i = 0; i < ncmds && p + sizeof(struct load_command) <= end; i++) {
-            const struct load_command *lc = (const struct load_command *)p;
-            if (lc->cmd == LC_CODE_SIGNATURE) {
-                const struct linkedit_data_command *ld = (const struct linkedit_data_command *)p;
-                csOff = ld->dataoff; csSize = ld->datasize; break;
-            }
-            if (lc->cmdsize == 0) break;
-            p += lc->cmdsize;
-        }
-        if (csOff && csSize) {
-            NSData *sig = miosReadAt(fh, sliceOff + csOff, csSize);
-            const uint8_t *s = sig.bytes;
-            if (sig.length >= 12 && OSSwapBigToHostInt32(*(const uint32_t *)s) == MIOS_CS_EMBEDDED_SIGNATURE) {
-                uint32_t count = OSSwapBigToHostInt32(*(const uint32_t *)(s + 8));
-                for (uint32_t i = 0; i < count; i++) {
-                    const uint8_t *idx = s + 12 + i * 8;
-                    if (idx + 8 > s + sig.length) break;
-                    uint32_t bo = OSSwapBigToHostInt32(*(const uint32_t *)(idx + 4));
-                    if (bo + 8 > sig.length) continue;
-                    if (OSSwapBigToHostInt32(*(const uint32_t *)(s + bo)) == MIOS_CS_EMBEDDED_ENTITLEMENTS) {
-                        uint32_t bl = OSSwapBigToHostInt32(*(const uint32_t *)(s + bo + 4));
-                        if (bl > 8 && bo + bl <= sig.length) {
-                            NSData *pl = [NSData dataWithBytes:(s + bo + 8) length:(bl - 8)];
-                            id obj = [NSPropertyListSerialization propertyListWithData:pl options:0 format:NULL error:NULL];
-                            id g = [obj isKindOfClass:[NSDictionary class]] ? obj[@"com.apple.security.application-groups"] : nil;
-                            if ([g isKindOfClass:[NSArray class]]) result = g;
-                        }
-                        break;
-                    }
-                }
-            }
-        }
-    } @catch (__unused id e) {}
-    [fh closeFile];
-    return result;
-}
-
-// Remove every entry inside a directory, optionally skipping entries whose name matches a predicate.
-static void miosWipeDirContents(NSFileManager *fm, NSString *dir, BOOL (^keep)(NSString *name)) {
-    if (dir.length == 0) return;
-    for (NSString *item in [fm contentsOfDirectoryAtPath:dir error:nil] ?: @[]) {
-        if (keep && keep(item)) continue;
-        [fm removeItemAtPath:[dir stringByAppendingPathComponent:item] error:nil];
-    }
-}
-
-// First launch of a container: wipe EVERYTHING the app could use to recognise a previous identity —
-// its own data container, cookies, caches, web data, NSUserDefaults, this container's keychain items,
-// and the shared App Group state (where Instagram/Facebook stash the persistent device-id + header).
-// Modelled on the "clear storage + keychain completely" dylib, but scoped to the current container so
-// a fresh container always looks like a brand-new device. Gated by a marker so it runs exactly once.
-static void miosResetContainerCachesOnce(NSString *uuid) {
-    if (uuid.length == 0) return;
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSString *home = NSHomeDirectory();
-    NSString *marker = [home stringByAppendingPathComponent:
-                        [NSString stringWithFormat:@"Library/.mios_init_%@", uuid]];
-    if ([fm fileExistsAtPath:marker]) return;   // already initialised this container
-
-    // 1. The app's own cache/identity stores. We clear ONLY well-known caches, never Documents or
-    //    Library wholesale: the app's pre-main init reads files under its sandbox, and deleting a
-    //    directory out from under it aborts startup. A genuinely fresh container has nothing else
-    //    here anyway — the identity that actually persists lives in the App Group + keychain (below).
-    for (NSString *sub in @[@"tmp", @"Library/Caches", @"Library/Cookies",
-                            @"Library/WebKit", @"Library/HTTPStorages"]) {
-        miosWipeDirContents(fm, [home stringByAppendingPathComponent:sub], nil);
-    }
-
-    // 2. Cookies, URL cache and WebKit website data (identity often hides in cookies / local storage).
-    @try {
-        NSHTTPCookieStorage *cookies = [NSHTTPCookieStorage sharedHTTPCookieStorage];
-        for (NSHTTPCookie *c in [cookies.cookies copy]) [cookies deleteCookie:c];
-    } @catch (__unused id e) {}
-    @try { [[NSURLCache sharedURLCache] removeAllCachedResponses]; } @catch (__unused id e) {}
-
-    // 3. NSUserDefaults for the app itself.
-    @try {
-        NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
-        if (gBundleID.length) [d removePersistentDomainForName:gBundleID];
-        [d synchronize];
-    } @catch (__unused id e) {}
-
-    // 4. Shared App Group state (survives container recreation — the main device-id cache for IG/FB).
-    for (NSString *group in miosSelfAppGroups()) {
-        if (![group isKindOfClass:[NSString class]] || group.length == 0) continue;
-        @try {
-            NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:group];
-            [d removePersistentDomainForName:group];
-            [d synchronize];
-        } @catch (__unused id e) {}
-        NSURL *gurl = [fm containerURLForSecurityApplicationGroupIdentifier:group];
-        if (gurl) {
-            for (NSString *sub in @[@"Library/Preferences", @"Library/Caches", @"Library/Application Support"]) {
-                miosWipeDirContents(fm, [gurl.path stringByAppendingPathComponent:sub], nil);
-            }
-        }
-    }
-
-    // 5. This container's own keychain items (safe no-op for a genuinely new UUID; cleans a reused one).
-    miosPurgeContainerKeychain();
-
-    [fm createDirectoryAtPath:[marker stringByDeletingLastPathComponent] withIntermediateDirectories:YES attributes:nil error:nil];
-    [@"1" writeToFile:marker atomically:YES encoding:NSUTF8StringEncoding error:nil];
-}
+// We deliberately do NOT wipe the App Group in-process. The App Group container is SHARED across all
+// of an app's family apps (Instagram / Facebook / Threads / Messenger) and holds the logged-in
+// session, so wiping it would log the user out and clobber sibling apps' data. Instead the privileged
+// daemon (miosd, see switchGroupContainers) gives each logical container its OWN App Group container
+// at the system level via MCMSharedDataContainer + replaceContainer:, so every container keeps its own
+// device-id, header and session with nothing deleted and no other app touched.
 
 // MARK: - Constructor
 
@@ -935,10 +753,6 @@ static void miosResetContainerCachesOnce(NSString *uuid) {
         miosInitKeychainNamespace();
 
         if (!gSpoof) gSpoof = @{};
-
-        // First launch of this container: wipe cached App Group state (device-id/header) so the app
-        // re-registers as the spoofed device instead of a value cached from a previous container.
-        miosResetContainerCachesOnce(uuid);
 
         // Precompute every C-hook value NOW (ObjC is safe here), so the low-level hooks never allocate.
         miosBuildSpoofCache();
