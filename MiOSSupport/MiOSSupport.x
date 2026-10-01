@@ -22,6 +22,9 @@
 #import <objc/runtime.h>
 #import <substrate.h>
 #import <dlfcn.h>
+#import <stdlib.h>
+#import <sys/sysctl.h>
+#import <sys/time.h>
 
 static NSString *const kMiOSBase = @"/var/mobile/Library/Preferences/MiOS";
 
@@ -44,6 +47,60 @@ static void supLog(NSString *tag, NSString *line) {
 static BOOL miosDisabled(void) {
     return [[NSFileManager defaultManager] fileExistsAtPath:
             [kMiOSBase stringByAppendingPathComponent:@"disable"]];
+}
+
+// ---- ANTI-BRICK SAFETY LAYER (mirrors Crane's own protection) --------------------------------------
+// Three independent safeguards so a bad daemon hook can NEVER permanently kill the jailbreak:
+//   1. Safe mode: ellekit sets _MSSafeMode=1 when booting with Volume-Up held. We no-op in it, so a
+//      Volume-Up boot ALWAYS comes up clean — the guaranteed manual escape hatch.
+//   2. Opt-in: daemon injection does NOTHING unless /…/MiOS/enable_daemons exists. Default = off, so
+//      simply installing miOS never touches a system daemon.
+//   3. Boot watchdog: we "arm" a file (stamped with this boot's id) before hooking; SpringBoard clears
+//      it once the GUI is up. If a daemon starts and finds the file armed with a DIFFERENT (previous)
+//      boot id, that previous boot never reached SpringBoard → it crashed → we DISABLE for this boot.
+//      Result: one failed boot, then the next boot self-heals with no user action.
+
+static NSString *const kArmPath = @"/var/mobile/Library/Preferences/MiOS/boot_armed";
+
+static BOOL miosSafeMode(void) {
+    const char *s = getenv("_MSSafeMode"); if (s && atoi(s) != 0) return YES;
+    s = getenv("_SafeMode");               if (s && atoi(s) != 0) return YES;
+    return NO;
+}
+
+static BOOL miosDaemonOptIn(void) {
+    return [[NSFileManager defaultManager] fileExistsAtPath:
+            [kMiOSBase stringByAppendingPathComponent:@"enable_daemons"]];
+}
+
+static long miosBootID(void) {
+    struct timeval bt; memset(&bt, 0, sizeof(bt));
+    size_t sz = sizeof(bt); int mib[2] = { CTL_KERN, KERN_BOOTTIME };
+    if (sysctl(mib, 2, &bt, &sz, NULL, 0) == 0) return (long)bt.tv_sec;
+    return 0;
+}
+
+// Returns YES if it is safe to install hooks this boot (and arms the watchdog); NO if the previous boot
+// failed to complete (self-disable). World-writable arm file so SpringBoard (mobile) can clear it.
+static BOOL miosWatchdogArmOrDisable(void) {
+    long cur = miosBootID();
+    NSString *existing = [NSString stringWithContentsOfFile:kArmPath encoding:NSUTF8StringEncoding error:nil];
+    if (existing.length) {
+        long armed = (long)[existing longLongValue];
+        if (armed != 0 && armed != cur) {
+            supLog(@"watchdog", [NSString stringWithFormat:
+                @"previous boot %ld never reached SpringBoard — DISABLING daemon hooks this boot (self-heal)", armed]);
+            return NO;                      // last boot crashed → stand down this boot
+        }
+        return YES;                         // armed by a sibling daemon THIS boot → ok
+    }
+    @try {
+        [[NSString stringWithFormat:@"%ld", cur] writeToFile:kArmPath atomically:YES
+                                                    encoding:NSUTF8StringEncoding error:nil];
+        [[NSFileManager defaultManager] setAttributes:@{ NSFilePosixPermissions: @(0666) }
+                                         ofItemAtPath:kArmPath error:nil];
+    } @catch (__unused id e) {}
+    return YES;
 }
 
 // Active container UUID for a bundle id, read from the central prefs the app writes. Returns nil for
@@ -257,6 +314,11 @@ static void initLsd(void) {
 %ctor {
     @autoreleasepool {
         @try {
+            // --- anti-brick gates (any one of them → install nothing) ---
+            if (miosSafeMode()) return;                 // Volume-Up safe boot → always clean
+            if (!miosDaemonOptIn()) return;             // off by default; enable_daemons must exist
+            if (!miosWatchdogArmOrDisable()) return;    // last boot failed → self-disable this boot
+
             char buf[1024]; buf[0] = 0;
             uint32_t sz = sizeof(buf);
             extern int _NSGetExecutablePath(char *, uint32_t *);

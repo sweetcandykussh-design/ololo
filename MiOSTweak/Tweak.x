@@ -966,6 +966,15 @@ static void miosRedirectLog(NSString *line) {
             if (applyProfile) applyProfile("MiOS-Profile");
         }
 
+        // Boot-watchdog DISARM: SpringBoard reaching this point means the GUI came up, i.e. the system
+        // daemons survived this boot. Clear the arm file so MiOSSupport keeps its daemon hooks enabled.
+        // If a daemon hook had hung the boot, we'd never get here, the file would stay armed, and the
+        // next boot's daemons would self-disable. (See the safety layer in MiOSSupport.x.)
+        if ([gBundleID isEqualToString:@"com.apple.springboard"]) {
+            [[NSFileManager defaultManager] removeItemAtPath:
+                @"/var/mobile/Library/Preferences/MiOS/boot_armed" error:nil];
+        }
+
         NSString *uuid = nil;
 
         // PRIMARY: the daemon drops a bootstrap file INSIDE our own container when it switches us in.

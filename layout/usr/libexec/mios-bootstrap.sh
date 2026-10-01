@@ -1,7 +1,8 @@
 #!/bin/sh
 # Bring up the miOS container daemon at install time (no reboot — palera1n/rootless safe) and log
 # verbosely so the result is readable in Filza without a terminal. No respring is performed.
-LOGDIR=/var/mobile/Library/Preferences/MiOS/debug
+BASE=/var/mobile/Library/Preferences/MiOS
+LOGDIR="$BASE/debug"
 LOG="$LOGDIR/install.log"
 mkdir -p "$LOGDIR"
 
@@ -36,20 +37,26 @@ mkdir -p "$LOGDIR"
     done
   fi
 
-  echo "+ scheduling detached support-daemon restart (after install finishes)"
+  if [ -f "$BASE/enable_daemons" ]; then
+    echo "+ enable_daemons present → scheduling detached support-daemon restart"
+  else
+    echo "+ enable_daemons absent → NOT touching system daemons (safe default)"
+  fi
   echo "=== end ==="
 } >> "$LOG" 2>&1
 
-# Restart the Crane-style support daemons so MiOSSupport.dylib is injected, WITHOUT a reboot. This is
-# done detached and delayed ON PURPOSE: killing securityd/cfprefsd/containermanagerd synchronously
-# inside postinst blocks dpkg/Sileo (they use those daemons) → the long "Configuring" hang. We fully
-# detach (new session, fds to /dev/null) so the installer's postinst returns immediately, then restart
-# the daemons ~12s later once the install is done. launchd (KeepAlive) respawns each instantly.
-RESTART='sleep 12; for D in containermanagerd cfprefsd securityd lsd; do killall -9 "$D" 2>/dev/null; done; echo "restarted $(date)" >> '"$LOG"
-if command -v setsid >/dev/null 2>&1; then
-  setsid /bin/sh -c "$RESTART" >/dev/null 2>&1 </dev/null &
-else
-  /bin/sh -c "$RESTART" >/dev/null 2>&1 </dev/null &
+# Only restart the Crane-style support daemons when daemon injection is explicitly opted in. By default
+# (no enable_daemons file) we never touch system daemons, so a normal install can't affect boot at all.
+# When opted in: do it detached + delayed so it never blocks the installer (killing securityd/cfprefsd
+# synchronously inside postinst caused the long "Configuring" hang). launchd (KeepAlive) respawns each
+# instantly; MiOSSupport's own safe-mode + boot-watchdog then protect against a bad hook.
+if [ -f "$BASE/enable_daemons" ]; then
+  RESTART='sleep 12; for D in containermanagerd cfprefsd securityd lsd; do killall -9 "$D" 2>/dev/null; done; echo "restarted $(date)" >> '"$LOG"
+  if command -v setsid >/dev/null 2>&1; then
+    setsid /bin/sh -c "$RESTART" >/dev/null 2>&1 </dev/null &
+  else
+    /bin/sh -c "$RESTART" >/dev/null 2>&1 </dev/null &
+  fi
 fi
 
 chown -R 501:501 "$LOGDIR" 2>/dev/null
