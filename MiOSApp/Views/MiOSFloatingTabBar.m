@@ -5,6 +5,13 @@ static const CGFloat kItemSize = 50;
 static const CGFloat kCenterItemSize = 60;
 static const CGFloat kTopPadding = 8;
 
+// Rounded-design system font for the tab labels (the new typographic style).
+static UIFont *MiOSRoundedFont(CGFloat size, UIFontWeight weight) {
+    UIFont *base = [UIFont systemFontOfSize:size weight:weight];
+    UIFontDescriptor *desc = [base.fontDescriptor fontDescriptorWithDesign:UIFontDescriptorSystemDesignRounded];
+    return desc ? [UIFont fontWithDescriptor:desc size:size] : base;
+}
+
 @implementation MiOSFloatingTabBar {
     NSArray<NSString *> *_titles;
     NSArray<NSString *> *_icons;
@@ -67,7 +74,7 @@ static const CGFloat kTopPadding = 8;
         UILabel *label = [[UILabel alloc] init];
         label.text = _titles[i];
         label.textAlignment = NSTextAlignmentCenter;
-        label.font = [UIFont systemFontOfSize:10 weight:UIFontWeightMedium];
+        label.font = MiOSRoundedFont(10, UIFontWeightMedium);
         label.adjustsFontSizeToFitWidth = YES;
         label.minimumScaleFactor = 0.8;
         [self addSubview:label];
@@ -142,7 +149,7 @@ static const CGFloat kTopPadding = 8;
             circle.layer.shadowOffset = CGSizeZero;
             _iconViews[i].tintColor = [UIColor colorWithRed:0.08 green:0.08 blue:0.12 alpha:1.0];
             _labels[i].textColor = [UIColor whiteColor];
-            _labels[i].font = [UIFont systemFontOfSize:10 weight:UIFontWeightSemibold];
+            _labels[i].font = MiOSRoundedFont(10, UIFontWeightSemibold);
         } else {
             BOOL isCenter = [self isCenterIndex:i];
             UIColor *accent = [MiOSTheme accentColor];
@@ -156,7 +163,7 @@ static const CGFloat kTopPadding = 8;
             circle.layer.shadowOffset = CGSizeZero;
             _iconViews[i].tintColor = isCenter ? [MiOSTheme textColorOnAccent] : [UIColor colorWithWhite:1.0 alpha:0.85];
             _labels[i].textColor = [UIColor colorWithWhite:1.0 alpha:0.55];
-            _labels[i].font = [UIFont systemFontOfSize:10 weight:UIFontWeightMedium];
+            _labels[i].font = MiOSRoundedFont(10, UIFontWeightMedium);
         }
     }
 }

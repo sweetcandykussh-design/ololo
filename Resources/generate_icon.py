@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
-"""Generate pixel-art miOS app icon."""
+"""Generate the miOS app icon: a pixel-art little-devil mascot on a dark neon plate.
+
+Pure stdlib (hand-written PNG), no PIL required.
+"""
 import struct, zlib, os
+
 
 def create_png(width, height, pixels):
     def chunk(ctype, data):
@@ -18,98 +22,104 @@ def create_png(width, height, pixels):
     ihdr = struct.pack('>IIBBBBB', width, height, 8, 6, 0, 0, 0)
     return sig + chunk(b'IHDR', ihdr) + chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b'')
 
-SIZE = 180
-pixels = [(20, 20, 30, 255)] * (SIZE * SIZE)
 
-# gradient background
-for y in range(SIZE):
-    for x in range(SIZE):
-        t = x / SIZE
-        s = y / SIZE
-        r = int(0 + 90 * t + 50 * s)
-        g = int(180 * (1 - t * 0.3) - 40 * s)
-        b = int(220 + 35 * t - 20 * s)
-        pixels[y * SIZE + x] = (min(255, max(0, r)), min(255, max(0, g)), min(255, max(0, b)), 255)
-
-# pixel grid pattern - a cartoon apple made of pixels
-PX = 8
+# Devil-head pixel grid (matches MiOSMascotRenderer): A body, E eye, M mouth, . transparent.
 GRID = [
-    "...........",
-    "....CCC....",
-    "...CCCCC...",
-    ".AAAAAAAAA.",
-    "AAAAAAAAAAA",
-    "AAAAAAAAAAA",
-    "AABBAAABBAA",
-    "AAAAAAAAAAA",
-    "AAAAAAAAAAA",
-    ".AAAAAAAAA.",
+    ".A.......A.",
+    ".AA.....AA.",
+    "..AA...AA..",
     "..AAAAAAA..",
-    "...AAAAA...",
-    "....AAA....",
+    ".AAAAAAAAA.",
+    "AAAAAAAAAAA",
+    "AAAAAAAAAAA",
+    "AAEEAAAEEAA",
+    "AAEEAAAEEAA",
+    "AAAAAAAAAAA",
+    ".AAAMMMAAA.",
+    "..AAAAAAA..",
 ]
 
-colors = {
-    'A': (255, 255, 255, 240),
-    'B': (0, 210, 240, 255),
-    'C': (100, 220, 140, 255),
-    '.': None,
-}
+# Brand colours: violet -> cyan body blend, white glowing eyes, dark mouth.
+BODY_TOP = (150, 110, 255)
+BODY_BOT = (70, 200, 240)
+EYE = (255, 255, 255)
+MOUTH = (40, 20, 70)
 
-ox = (SIZE - len(GRID[0]) * PX) // 2
-oy = (SIZE - len(GRID) * PX) // 2 + 10
 
-for gy, row in enumerate(GRID):
-    for gx, ch in enumerate(row):
-        c = colors.get(ch)
-        if not c:
-            continue
-        for dy in range(PX):
-            for dx in range(PX):
-                px = ox + gx * PX + dx
-                py = oy + gy * PX + dy
-                if 0 <= px < SIZE and 0 <= py < SIZE:
-                    pixels[py * SIZE + px] = c
+def lerp(a, b, t):
+    return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
 
-# text "miOS" at bottom in tiny pixel font
-text_y = SIZE - 28
-text_pixels = [
-    # m
-    [(0,0),(1,0),(3,0),(4,0), (0,1),(1,1),(2,1),(3,1),(4,1), (0,2),(2,2),(4,2), (0,3),(4,3)],
-    # i
-    [(7,0), (7,2),(7,3)],
-    # O
-    [(10,0),(11,0),(12,0), (9,1),(13,1), (9,2),(13,2), (10,3),(11,3),(12,3)],
-    # S
-    [(16,0),(17,0),(18,0), (15,1), (16,2),(17,2),(18,2), (19,3), (15,3),(16,3),(17,3)],
-]
 
-text_ox = SIZE // 2 - 10 * 2
-for letter in text_pixels:
-    for (lx, ly) in letter:
-        for dy in range(3):
-            for dx in range(3):
-                px = text_ox + lx * 3 + dx
-                py = text_y + ly * 4 + dy
-                if 0 <= px < SIZE and 0 <= py < SIZE:
-                    pixels[py * SIZE + px] = (255, 255, 255, 255)
+def build(SIZE):
+    pixels = [(10, 9, 17, 255)] * (SIZE * SIZE)
+    # dark diagonal gradient background
+    for y in range(SIZE):
+        for x in range(SIZE):
+            t = (x + y) / (2 * SIZE)
+            r = int(26 - 14 * t)
+            g = int(23 - 13 * t)
+            b = int(43 - 25 * t)
+            pixels[y * SIZE + x] = (r, g, b, 255)
+
+    rows = len(GRID)
+    cols = len(GRID[0])
+    margin = int(SIZE * 0.17)
+    area = SIZE - margin * 2
+    cell = area // max(rows, cols)
+    gw, gh = cell * cols, cell * rows
+    ox = (SIZE - gw) // 2
+    oy = (SIZE - gh) // 2
+    gap = max(1, cell // 12)
+
+    def put(px, py, color):
+        if 0 <= px < SIZE and 0 <= py < SIZE:
+            pixels[py * SIZE + px] = color
+
+    # soft eye glow pass
+    for gy, row in enumerate(GRID):
+        for gx, ch in enumerate(row):
+            if ch != 'E':
+                continue
+            cx = ox + gx * cell + cell // 2
+            cy = oy + gy * cell + cell // 2
+            rad = int(cell * 1.1)
+            for dy in range(-rad, rad):
+                for dx in range(-rad, rad):
+                    d = (dx * dx + dy * dy) ** 0.5
+                    if d > rad:
+                        continue
+                    a = max(0.0, 1.0 - d / rad) * 0.5
+                    px, py = cx + dx, cy + dy
+                    if 0 <= px < SIZE and 0 <= py < SIZE:
+                        base = pixels[py * SIZE + px]
+                        glow = (150, 120, 255)
+                        pixels[py * SIZE + px] = (
+                            min(255, int(base[0] + glow[0] * a)),
+                            min(255, int(base[1] + glow[1] * a)),
+                            min(255, int(base[2] + glow[2] * a)),
+                            255,
+                        )
+
+    # pixel blocks
+    for gy, row in enumerate(GRID):
+        for gx, ch in enumerate(row):
+            if ch == '.':
+                continue
+            if ch == 'E':
+                color = EYE + (255,)
+            elif ch == 'M':
+                color = MOUTH + (255,)
+            else:
+                color = lerp(BODY_TOP, BODY_BOT, gy / (rows - 1)) + (255,)
+            for dy in range(gap, cell - gap):
+                for dx in range(gap, cell - gap):
+                    put(ox + gx * cell + dx, oy + gy * cell + dy, color)
+
+    return pixels
+
 
 out_dir = os.path.dirname(os.path.abspath(__file__))
-png_data = create_png(SIZE, SIZE, pixels)
-with open(os.path.join(out_dir, 'AppIcon60x60@3x.png'), 'wb') as f:
-    f.write(png_data)
-
-# Also generate 2x
-SIZE2 = 120
-pixels2 = [(20, 20, 30, 255)] * (SIZE2 * SIZE2)
-for y in range(SIZE2):
-    for x in range(SIZE2):
-        sx = int(x * SIZE / SIZE2)
-        sy = int(y * SIZE / SIZE2)
-        pixels2[y * SIZE2 + x] = pixels[sy * SIZE + sx]
-
-png_data2 = create_png(SIZE2, SIZE2, pixels2)
-with open(os.path.join(out_dir, 'AppIcon60x60@2x.png'), 'wb') as f:
-    f.write(png_data2)
-
-print("Icons generated.")
+for size, name in [(180, 'AppIcon60x60@3x.png'), (120, 'AppIcon60x60@2x.png')]:
+    with open(os.path.join(out_dir, name), 'wb') as f:
+        f.write(create_png(size, size, build(size)))
+    print("wrote", name)

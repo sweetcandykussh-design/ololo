@@ -6,6 +6,7 @@
 #import "../UI/MiOSTheme.h"
 #import "../Utils/MiOSDeviceImageRenderer.h"
 #import "../Utils/MiOSAppIconProvider.h"
+#import "../Utils/MiOSMascotRenderer.h"
 #import "../Views/MiOSGradientView.h"
 #import "../Views/MiOSContainerGridView.h"
 
@@ -179,60 +180,55 @@ static UIColor *MiOSPartnerHue(UIColor *accent) {
     UIView *row = [[UIView alloc] init];
     row.translatesAutoresizingMaskIntoConstraints = NO;
 
+    // Wordmark — kept as "miOS" but set in the wide, heavy style of the reference.
     UILabel *logo = [[UILabel alloc] init];
     logo.translatesAutoresizingMaskIntoConstraints = NO;
-    logo.text = @"miOS";
-    logo.font = [UIFont systemFontOfSize:24 weight:UIFontWeightHeavy];
-    logo.textColor = [MiOSTheme primaryText];
+    logo.attributedText = [[NSAttributedString alloc] initWithString:@"miOS" attributes:@{
+        NSFontAttributeName: [UIFont systemFontOfSize:30 weight:UIFontWeightHeavy],
+        NSForegroundColorAttributeName: [MiOSTheme primaryText],
+        NSKernAttributeName: @1.5,
+    }];
     [row addSubview:logo];
 
-    UILabel *version = [[UILabel alloc] init];
-    version.translatesAutoresizingMaskIntoConstraints = NO;
-    version.text = @"v1.0.0";
-    version.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightMedium];
-    version.textColor = [MiOSTheme tertiaryText];
-    [row addSubview:version];
+    // Spaced "CONTAINERS" descriptor beneath the wordmark.
+    UILabel *descriptor = [[UILabel alloc] init];
+    descriptor.translatesAutoresizingMaskIntoConstraints = NO;
+    descriptor.attributedText = [[NSAttributedString alloc] initWithString:@"CONTAINERS" attributes:@{
+        NSFontAttributeName: [UIFont systemFontOfSize:11 weight:UIFontWeightSemibold],
+        NSForegroundColorAttributeName: [MiOSTheme secondaryText],
+        NSKernAttributeName: @5.0,
+    }];
+    [row addSubview:descriptor];
 
-    // Notification bell — decorative for now.
-    UIView *bell = [[UIView alloc] init];
-    bell.translatesAutoresizingMaskIntoConstraints = NO;
-    bell.userInteractionEnabled = NO;
-    bell.backgroundColor = [UIColor colorWithRed:0.16 green:0.17 blue:0.24 alpha:0.92];
-    bell.layer.cornerRadius = 21;
-    bell.layer.borderWidth = 1.0;
-    bell.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.10].CGColor;
-    [row addSubview:bell];
+    // Tagline in the active accent colour.
+    UILabel *tagline = [[UILabel alloc] init];
+    tagline.translatesAutoresizingMaskIntoConstraints = NO;
+    tagline.attributedText = [[NSAttributedString alloc] initWithString:@"MORE APPS. MORE FREEDOM." attributes:@{
+        NSFontAttributeName: [UIFont systemFontOfSize:10 weight:UIFontWeightBold],
+        NSForegroundColorAttributeName: accent,
+        NSKernAttributeName: @1.5,
+    }];
+    [row addSubview:tagline];
 
-    UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:17 weight:UIImageSymbolWeightSemibold];
-    UIImageView *bellIcon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"bell.fill" withConfiguration:cfg]];
-    bellIcon.translatesAutoresizingMaskIntoConstraints = NO;
-    bellIcon.tintColor = [UIColor colorWithWhite:1.0 alpha:0.85];
-    [bell addSubview:bellIcon];
-
-    UIView *badge = [[UIView alloc] init];
-    badge.translatesAutoresizingMaskIntoConstraints = NO;
-    badge.backgroundColor = accent;
-    badge.layer.cornerRadius = 5;
-    badge.layer.borderWidth = 2;
-    badge.layer.borderColor = [UIColor colorWithRed:0.11 green:0.12 blue:0.19 alpha:1.0].CGColor;
-    [bell addSubview:badge];
+    // Pixel-art devil mascot, tinted to the active container's accent.
+    UIImageView *mascot = [[UIImageView alloc] initWithImage:
+        [MiOSMascotRenderer mascotWithSize:CGSizeMake(78, 78) accent:accent]];
+    mascot.translatesAutoresizingMaskIntoConstraints = NO;
+    mascot.contentMode = UIViewContentModeScaleAspectFit;
+    [row addSubview:mascot];
 
     [NSLayoutConstraint activateConstraints:@[
-        [row.heightAnchor constraintEqualToConstant:44],
-        [logo.leadingAnchor constraintEqualToAnchor:row.leadingAnchor constant:4],
-        [logo.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
-        [version.leadingAnchor constraintEqualToAnchor:logo.trailingAnchor constant:8],
-        [version.lastBaselineAnchor constraintEqualToAnchor:logo.lastBaselineAnchor],
-        [bell.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
-        [bell.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
-        [bell.widthAnchor constraintEqualToConstant:42],
-        [bell.heightAnchor constraintEqualToConstant:42],
-        [bellIcon.centerXAnchor constraintEqualToAnchor:bell.centerXAnchor],
-        [bellIcon.centerYAnchor constraintEqualToAnchor:bell.centerYAnchor],
-        [badge.topAnchor constraintEqualToAnchor:bell.topAnchor constant:7],
-        [badge.trailingAnchor constraintEqualToAnchor:bell.trailingAnchor constant:-8],
-        [badge.widthAnchor constraintEqualToConstant:10],
-        [badge.heightAnchor constraintEqualToConstant:10],
+        [row.heightAnchor constraintEqualToConstant:80],
+        [logo.leadingAnchor constraintEqualToAnchor:row.leadingAnchor constant:2],
+        [logo.topAnchor constraintEqualToAnchor:row.topAnchor constant:2],
+        [descriptor.leadingAnchor constraintEqualToAnchor:logo.leadingAnchor constant:1],
+        [descriptor.topAnchor constraintEqualToAnchor:logo.bottomAnchor constant:1],
+        [tagline.leadingAnchor constraintEqualToAnchor:logo.leadingAnchor constant:1],
+        [tagline.topAnchor constraintEqualToAnchor:descriptor.bottomAnchor constant:7],
+        [mascot.trailingAnchor constraintEqualToAnchor:row.trailingAnchor constant:4],
+        [mascot.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [mascot.widthAnchor constraintEqualToConstant:78],
+        [mascot.heightAnchor constraintEqualToConstant:78],
     ]];
     return row;
 }
@@ -721,29 +717,51 @@ static UIColor *MiOSPartnerHue(UIColor *accent) {
 
     UIColor *textColor = [MiOSTheme textColorOnAccent];
 
-    // Folders tucked into both edges.
-    UIImageView *leftFolder = [self addWatermark:@"folder.fill" toTile:card pointSize:64
-                                           color:[textColor colorWithAlphaComponent:0.20] rotation:-0.28];
-    UIImageView *rightFolder = [self addWatermark:@"folder.fill.badge.plus" toTile:card pointSize:64
-                                            color:[textColor colorWithAlphaComponent:0.20] rotation:0.24];
+    // 3D cube glyph set into the left, echoing the reference's isolate-box motif.
+    UIImageView *cubeMark = [self addWatermark:@"cube.fill" toTile:card pointSize:92
+                                         color:[textColor colorWithAlphaComponent:0.16] rotation:0.0];
+
+    UIView *cubeBadge = [[UIView alloc] init];
+    cubeBadge.translatesAutoresizingMaskIntoConstraints = NO;
+    cubeBadge.userInteractionEnabled = NO;
+    cubeBadge.backgroundColor = [textColor colorWithAlphaComponent:0.16];
+    cubeBadge.layer.cornerRadius = 15;
+    cubeBadge.layer.cornerCurve = kCACornerCurveContinuous;
+    [card addSubview:cubeBadge];
+    UIImageSymbolConfiguration *cubeCfg = [UIImageSymbolConfiguration configurationWithPointSize:24 weight:UIImageSymbolWeightBold];
+    UIImageView *cubeIcon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"cube.fill" withConfiguration:cubeCfg]];
+    cubeIcon.translatesAutoresizingMaskIntoConstraints = NO;
+    cubeIcon.tintColor = textColor;
+    [cubeBadge addSubview:cubeIcon];
 
     UILabel *title = [[UILabel alloc] init];
     title.translatesAutoresizingMaskIntoConstraints = NO;
     title.text = @"New Container";
     title.font = [UIFont systemFontOfSize:22 weight:UIFontWeightBold];
     title.textColor = textColor;
-    title.textAlignment = NSTextAlignmentCenter;
     [card addSubview:title];
 
     UILabel *sub = [[UILabel alloc] init];
     sub.translatesAutoresizingMaskIntoConstraints = NO;
     sub.text = @"Isolate apps · spoof GPS, device & IDs";
     sub.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
-    sub.textColor = [textColor colorWithAlphaComponent:0.8];
-    sub.textAlignment = NSTextAlignmentCenter;
+    sub.textColor = [textColor colorWithAlphaComponent:0.85];
     sub.adjustsFontSizeToFitWidth = YES;
     sub.minimumScaleFactor = 0.8;
     [card addSubview:sub];
+
+    // Trailing arrow in a soft chip.
+    UIView *arrowChip = [[UIView alloc] init];
+    arrowChip.translatesAutoresizingMaskIntoConstraints = NO;
+    arrowChip.userInteractionEnabled = NO;
+    arrowChip.backgroundColor = [textColor colorWithAlphaComponent:0.18];
+    arrowChip.layer.cornerRadius = 16;
+    [card addSubview:arrowChip];
+    UIImageSymbolConfiguration *arrCfg = [UIImageSymbolConfiguration configurationWithPointSize:15 weight:UIImageSymbolWeightBold];
+    UIImageView *arrow = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"arrow.right" withConfiguration:arrCfg]];
+    arrow.translatesAutoresizingMaskIntoConstraints = NO;
+    arrow.tintColor = textColor;
+    [arrowChip addSubview:arrow];
 
     [NSLayoutConstraint activateConstraints:@[
         [host.heightAnchor constraintEqualToConstant:100],
@@ -755,15 +773,25 @@ static UIColor *MiOSPartnerHue(UIColor *accent) {
         [sheen.leadingAnchor constraintEqualToAnchor:card.leadingAnchor],
         [sheen.trailingAnchor constraintEqualToAnchor:card.trailingAnchor],
         [sheen.bottomAnchor constraintEqualToAnchor:card.bottomAnchor],
-        [leftFolder.centerXAnchor constraintEqualToAnchor:card.leadingAnchor constant:14],
-        [leftFolder.centerYAnchor constraintEqualToAnchor:card.centerYAnchor constant:10],
-        [rightFolder.centerXAnchor constraintEqualToAnchor:card.trailingAnchor constant:-12],
-        [rightFolder.centerYAnchor constraintEqualToAnchor:card.centerYAnchor constant:-8],
-        [title.centerXAnchor constraintEqualToAnchor:card.centerXAnchor],
+        [cubeMark.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:38],
+        [cubeMark.centerYAnchor constraintEqualToAnchor:card.centerYAnchor],
+        [cubeBadge.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:16],
+        [cubeBadge.centerYAnchor constraintEqualToAnchor:card.centerYAnchor],
+        [cubeBadge.widthAnchor constraintEqualToConstant:52],
+        [cubeBadge.heightAnchor constraintEqualToConstant:52],
+        [cubeIcon.centerXAnchor constraintEqualToAnchor:cubeBadge.centerXAnchor],
+        [cubeIcon.centerYAnchor constraintEqualToAnchor:cubeBadge.centerYAnchor],
+        [title.leadingAnchor constraintEqualToAnchor:cubeBadge.trailingAnchor constant:14],
         [title.bottomAnchor constraintEqualToAnchor:card.centerYAnchor constant:2],
+        [sub.leadingAnchor constraintEqualToAnchor:title.leadingAnchor],
         [sub.topAnchor constraintEqualToAnchor:title.bottomAnchor constant:4],
-        [sub.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:56],
-        [sub.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-56],
+        [sub.trailingAnchor constraintEqualToAnchor:arrowChip.leadingAnchor constant:-8],
+        [arrowChip.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-16],
+        [arrowChip.centerYAnchor constraintEqualToAnchor:card.centerYAnchor],
+        [arrowChip.widthAnchor constraintEqualToConstant:32],
+        [arrowChip.heightAnchor constraintEqualToConstant:32],
+        [arrow.centerXAnchor constraintEqualToAnchor:arrowChip.centerXAnchor],
+        [arrow.centerYAnchor constraintEqualToAnchor:arrowChip.centerYAnchor],
     ]];
 
     [host addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(newContainerTapped:)]];

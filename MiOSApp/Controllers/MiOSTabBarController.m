@@ -32,7 +32,8 @@
 
     _floatingBar = [[MiOSFloatingTabBar alloc]
         initWithTitles:@[@"Home", @"Containers", @"Cloud", @"Proxies", @"Settings"]
-                 icons:@[@"house.fill", @"folder.fill", @"cloud.fill", @"wifi", @"gearshape.fill"]];
+                 icons:@[@"house.fill", @"square.stack.3d.up.fill", @"cloud.fill",
+                         @"antenna.radiowaves.left.and.right", @"gearshape.fill"]];
     _floatingBar.selectedIndex = 0;
     __weak typeof(self) weakSelf = self;
     _floatingBar.onSelect = ^(NSInteger index) {
