@@ -69,12 +69,16 @@ static BOOL miosSafeMode(void) {
 }
 
 // Per-daemon opt-in: the master "enable_daemons" turns all on; "enable_<name>" turns just one on, so a
-// single daemon can be enabled and tested in isolation (e.g. enable_securityd).
-static BOOL miosDaemonEnabled(NSString *shortName) {
+// single daemon can be enabled and tested in isolation (e.g. enable_securityd). Tolerant of a trailing
+// ".txt" because Filza appends it by default when creating a file.
+static BOOL miosFlagExists(NSString *flag) {
     NSFileManager *fm = [NSFileManager defaultManager];
-    if ([fm fileExistsAtPath:[kMiOSBase stringByAppendingPathComponent:@"enable_daemons"]]) return YES;
-    return [fm fileExistsAtPath:[kMiOSBase stringByAppendingPathComponent:
-            [@"enable_" stringByAppendingString:shortName]]];
+    NSString *base = [kMiOSBase stringByAppendingPathComponent:flag];
+    return [fm fileExistsAtPath:base] || [fm fileExistsAtPath:[base stringByAppendingPathExtension:@"txt"]];
+}
+static BOOL miosDaemonEnabled(NSString *shortName) {
+    if (miosFlagExists(@"enable_daemons")) return YES;
+    return miosFlagExists([@"enable_" stringByAppendingString:shortName]);
 }
 
 static long miosBootID(void) {
