@@ -9,8 +9,10 @@
 #import <errno.h>
 #import <mach-o/loader.h>
 #import <mach-o/fat.h>
+#import <mach-o/dyld.h>
 #import <libkern/OSByteOrder.h>
 #import "MiOSContainerManager.h"
+#import "fishhook.h"
 
 // MARK: - Private declarations
 
@@ -651,6 +653,24 @@ static void *new_dlsym(void *handle, const char *symbol) {
     return orig_dlsym ? orig_dlsym(handle, symbol) : NULL;
 }
 
+// Rebind the MGCopyAnswer import pointer to ours ONLY in the main executable and FBSharedFramework —
+// never in CoreTelephony, Shadow, or other system images, so nothing outside the app is affected and
+// the real libMobileGestalt function is left untouched.
+static void miosRebindMGInAppImages(void) {
+    struct rebinding rb = { "MGCopyAnswer", (void *)mios_MGCopyAnswer, NULL };
+    uint32_t count = _dyld_image_count();
+    for (uint32_t i = 0; i < count; i++) {
+        const struct mach_header *hdr = _dyld_get_image_header(i);
+        const char *name = _dyld_get_image_name(i);
+        if (!hdr) continue;
+        BOOL isMain = (hdr->filetype == MH_EXECUTE);
+        BOOL isFBShared = (name != NULL && strstr(name, "FBSharedFramework") != NULL);
+        if (isMain || isFBShared) {
+            rebind_symbols_image((void *)hdr, _dyld_get_image_vmaddr_slide(i), &rb, 1);
+        }
+    }
+}
+
 // MARK: - Derived unique-device identifiers (stable per container)
 
 static NSString *derivedHex(NSString *seed, NSString *salt, NSUInteger length) {
@@ -784,15 +804,23 @@ static void miosBuildSpoofCache(void) {
             sysctlbyname("hw.machine", b1, &s1, NULL, 0);
             selfTestAfter = @(b1);
 
-            // MGCopyAnswer: apps like Instagram read the model/iOS from MobileGestalt, resolving it
-            // via dlsym. We never patch the real MGCopyAnswer (that crashes CoreTelephony/Shadow).
-            // Instead we capture the real function, then hook dlsym so a lookup of "MGCopyAnswer"
-            // returns OUR implementation — only the app's own resolved pointer is affected.
+            // MGCopyAnswer: apps like Instagram read the model/iOS from MobileGestalt. We never patch
+            // the real MGCopyAnswer (that crashes CoreTelephony/Shadow). First we capture the real
+            // function, then hook dlsym so a runtime lookup of "MGCopyAnswer" returns OUR impl.
             if (gcMGProductType || gcMGProductVersion || gcMGDeviceName || gcMGHWModel) {
                 void *mgH = dlopen("/usr/lib/libMobileGestalt.dylib", RTLD_LAZY);
                 if (!mgH) mgH = dlopen("/var/jb/usr/lib/libMobileGestalt.dylib", RTLD_LAZY);
                 if (mgH) gRealMGCopyAnswer = (CFTypeRef(*)(CFStringRef))dlsym(mgH, "MGCopyAnswer");
                 MSHookFunction((void *)dlsym, (void *)new_dlsym, (void **)&orig_dlsym);
+
+                // Instagram (and the FBSharedFramework it embeds) bind MGCopyAnswer directly in their
+                // import tables, bypassing the dlsym hook above. Rebind that import pointer to ours
+                // with fishhook — this only rewrites Instagram's own __DATA/__DATA_CONST pointers and
+                // never touches the real libMobileGestalt function, so CoreTelephony stays intact.
+                // Scoped to Instagram, where the direct-binding path is what leaks the real device.
+                if (gRealMGCopyAnswer && [gBundleID isEqualToString:@"com.burbn.instagram"]) {
+                    miosRebindMGInAppImages();
+                }
             }
         }
 

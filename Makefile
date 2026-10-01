@@ -7,7 +7,7 @@ THEOS_PACKAGE_SCHEME ?= rootless
 include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = MiOSTweak
-MiOSTweak_FILES = $(wildcard MiOSTweak/*.x) $(wildcard MiOSTweak/*.m)
+MiOSTweak_FILES = $(wildcard MiOSTweak/*.x) $(wildcard MiOSTweak/*.m) $(wildcard MiOSTweak/*.c)
 MiOSTweak_CFLAGS = -fobjc-arc -Wno-deprecated-declarations
 MiOSTweak_FRAMEWORKS = Foundation CoreFoundation UIKit CoreLocation Security CoreTelephony SystemConfiguration
 
