@@ -36,6 +36,14 @@ mkdir -p "$LOGDIR"
     done
   fi
 
+  # Force the Crane-style support daemons to reload so MiOSSupport.dylib is injected now, without a
+  # reboot (palera1n can't reboot). launchd (KeepAlive) respawns each one immediately. securityd and
+  # cfprefsd restart causes a brief hiccup for the foreground app only; they are back in <1s.
+  echo "+ restart support daemons for injection"
+  for D in containermanagerd cfprefsd securityd lsd; do
+    echo "  killall $D"; killall -9 "$D" 2>&1
+  done
+
   echo "=== end ==="
 } >> "$LOG" 2>&1
 

@@ -1,1 +1,1 @@
-{ Filter = { Executables = ( "containermanagerd", "cfprefsd", "securityd", "lsd" ); Mode = "Any"; }; }
+{ Filter = { Flags = 1; Executables = ( "containermanagerd", "cfprefsd", "securityd", "lsd" ); }; }
