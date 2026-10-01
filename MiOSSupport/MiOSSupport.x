@@ -335,6 +335,9 @@ static void initCfprefsd(void) {
 // after the call. Offsets 0/8 are the first two pointer fields of SecurityClient (task, accessGroups)
 // per Apple's open source, so they are stable across iOS versions.
 
+// SecTaskRef is private on iOS (not in the public Security umbrella) — declare it ourselves.
+typedef struct __SecTask *SecTaskRef;
+
 // SecurityClient field access (first two fields are pointers: SecTaskRef task; CFArrayRef accessGroups;)
 #define MIOS_SC_TASK(c)   (*(SecTaskRef *)((char *)(c) + 0))
 #define MIOS_SC_AGRPS(c)  (*(CFArrayRef *)((char *)(c) + sizeof(void *)))
@@ -434,9 +437,31 @@ static void initSecurityd(void) {
 
 // ---- Phase 4: lsd (IDFV per container) ------------------------------------------------------------
 static void initLsd(void) {
-    supLog(@"lsd", @"[init] MiOSSupport up in lsd (discovery only)");
-    miosDumpClassesByPrefix("LS", @"endor,dentif", @"lsd");
-    miosDumpClassesByPrefix("_LS", @"endor,dentif", @"lsd");
+    supLog(@"lsd", @"[init] MiOSSupport up in lsd (discovery only — closed source, need real API)");
+    // Full method lists of the exact classes Crane works with, so lsd can be implemented precisely for
+    // this iOS (names/selectors are registered dynamically and not extractable from the Crane binary).
+    const char *lsClasses[] = { "_LSDDeviceIdentifierClient", "_LSDeviceIdentifierManager",
+                                "_LSDeviceIdentifierCache", "LSApplicationProxy" };
+    for (size_t i = 0; i < sizeof(lsClasses) / sizeof(lsClasses[0]); i++) {
+        miosDumpClassMethods(lsClasses[i], @"lsd");
+    }
+    miosDumpClassesByPrefix("LS", @"endor,dentif,evice", @"lsd");
+    miosDumpClassesByPrefix("_LS", @"endor,dentif,evice", @"lsd");
+    // The device-identifier protocol's methods (what the XPC interface exposes).
+    @try {
+        Protocol *p = objc_getProtocol("_LSDDeviceIdentifierProtocol");
+        if (p) {
+            unsigned int mc = 0;
+            struct objc_method_description *ms = protocol_copyMethodDescriptionList(p, YES, YES, &mc);
+            NSMutableArray *sels = [NSMutableArray array];
+            for (unsigned int i = 0; i < mc; i++) [sels addObject:@(sel_getName(ms[i].name))];
+            if (ms) free(ms);
+            supLog(@"lsd", [NSString stringWithFormat:@"_LSDDeviceIdentifierProtocol methods: %@",
+                            [sels componentsJoinedByString:@", "]]);
+        } else {
+            supLog(@"lsd", @"_LSDDeviceIdentifierProtocol NOT found");
+        }
+    } @catch (__unused id e) {}
 }
 
 // ---- entry point -----------------------------------------------------------------------------------
