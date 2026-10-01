@@ -289,7 +289,9 @@ static void switchGroupContainers(NSString *bid, NSString *lid, MCMContainerMana
 // Mint a brand-new empty real container; returns its UUID.
 static NSString *opCreate(NSString *bid, NSString *lid) {
     NSString *uuidStr = [NSUUID UUID].UUIDString;
+    dlog(@"[create] mint %@ for %@ (MCMAppDataClass=%@)", uuidStr, bid, MCMAppDataClass() ? @"ok" : @"MISSING");
     MCMContainer *c = containerForUUID(bid, uuidStr, YES);
+    dlog(@"[create]   containerForUUID -> %@", c ? @"ok" : @"nil");
     if (!c) return nil;
     NSString *real = c.uuid.UUIDString ?: uuidStr;
     storeRealUUID(bid, lid, real);
@@ -299,19 +301,27 @@ static NSString *opCreate(NSString *bid, NSString *lid) {
 // Make a saved container the app's active (assigned) container by replacing the current one, and do
 // the same for all of the app's App Group shared containers (full isolation, empty cache per container).
 static BOOL opSwitch(NSString *bid, NSString *lid) {
+    dlog(@"[switch] start bid=%@ lid=%@", bid, lid);
     NSString *real = storedRealUUID(bid, lid);
+    dlog(@"[switch]   storedRealUUID=%@", real ?: @"nil");
     if (!real) real = opCreate(bid, lid);
-    if (!real) return NO;
+    if (!real) { dlog(@"[switch]   abort: no real uuid"); return NO; }
 
+    dlog(@"[switch]   defaultManager...");
     MCMContainerManager *mgr = ((id (*)(id, SEL))objc_msgSend)(objc_getClass("MCMContainerManager"), @selector(defaultManager));
+    dlog(@"[switch]   mgr=%@", mgr ? @"ok" : @"nil");
 
+    dlog(@"[switch]   currentContainer...");
     MCMContainer *cur = currentContainer(bid, YES);
+    dlog(@"[switch]   cur=%@", cur ? cur.uuid.UUIDString : @"nil");
     MCMContainer *target = containerForUUID(bid, real, NO);
-    if (!cur || !target) return NO;
+    dlog(@"[switch]   target=%@", target ? target.uuid.UUIDString : @"nil");
+    if (!cur || !target) { dlog(@"[switch]   abort: cur/target nil"); return NO; }
 
     BOOL dataOK = YES;
     if (![cur.uuid.UUIDString isEqualToString:real]) {
         NSError *err = nil;
+        dlog(@"[switch]   replaceContainer...");
         dataOK = [mgr replaceContainer:cur withContainer:target error:&err];
         dlog(@"[data] %@ replace %@ -> %@ ok=%d err=%@", bid, cur.uuid.UUIDString, real, dataOK, err.localizedDescription);
     } else {
@@ -319,7 +329,9 @@ static BOOL opSwitch(NSString *bid, NSString *lid) {
     }
 
     // Isolate the App Group containers too (best-effort; never fail the switch over these).
+    dlog(@"[switch]   switchGroupContainers...");
     switchGroupContainers(bid, lid, mgr);
+    dlog(@"[switch]   done ok=%d", dataOK);
 
     return dataOK;
 }
@@ -390,17 +402,25 @@ static void handleRequest(void) {
         BOOL ok = (apps.count > 0);
         for (NSString *bid in apps) {
             if (![bid isKindOfClass:[NSString class]]) continue;
-            if ([op isEqualToString:@"create"]) {
-                ok = (opCreate(bid, lid) != nil) && ok;
-            } else if ([op isEqualToString:@"switch"]) {
-                BOOL s = opSwitch(bid, lid);
-                ok = s && ok;
-                if (s) {
-                    writeBootstrap(bid, lid);
-                    if (relaunch) relaunchApp(bid);
+            // Catch ObjC exceptions from the private MobileContainerManager API so a bad call logs its
+            // reason instead of aborting the daemon (which KeepAlive then restarts — the [req]->[start]
+            // loop we were seeing). A hard (non-ObjC) crash still shows in the crash report.
+            @try {
+                if ([op isEqualToString:@"create"]) {
+                    ok = (opCreate(bid, lid) != nil) && ok;
+                } else if ([op isEqualToString:@"switch"]) {
+                    BOOL s = opSwitch(bid, lid);
+                    ok = s && ok;
+                    if (s) {
+                        writeBootstrap(bid, lid);
+                        if (relaunch) relaunchApp(bid);
+                    }
+                } else if ([op isEqualToString:@"delete"]) {
+                    ok = opDelete(bid, lid) && ok;
                 }
-            } else if ([op isEqualToString:@"delete"]) {
-                ok = opDelete(bid, lid) && ok;
+            } @catch (NSException *e) {
+                dlog(@"[EXCEPTION] op=%@ bid=%@ : %@ — %@", op, bid, e.name, e.reason);
+                ok = NO;
             }
         }
 
