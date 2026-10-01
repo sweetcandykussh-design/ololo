@@ -1,0 +1,10 @@
+#!/bin/sh
+# miOS package postinst — runs as root at install time via the package manager, so the container
+# daemon comes up immediately without a reboot (palera1n/rootless can't reboot without losing JB).
+for S in /var/jb/usr/libexec/mios-bootstrap.sh /usr/libexec/mios-bootstrap.sh; do
+    if [ -f "$S" ]; then
+        sh "$S"
+        break
+    fi
+done
+exit 0

@@ -30,5 +30,13 @@ include $(THEOS_MAKE_PATH)/tweak.mk
 include $(THEOS_MAKE_PATH)/application.mk
 include $(THEOS_MAKE_PATH)/tool.mk
 
+# Install a real Debian postinst into the package control archive so the daemon is bootstrapped at
+# install time (Theos's after-install/install.exec only runs for `make install` over SSH, not in the
+# packaged .deb). Copying into $(THEOS_STAGING_DIR)/DEBIAN bypasses the rootless /var/jb prefixing.
+after-stage::
+	@mkdir -p "$(THEOS_STAGING_DIR)/DEBIAN"
+	@cp "$(THEOS_PROJECT_DIR)/postinst" "$(THEOS_STAGING_DIR)/DEBIAN/postinst"
+	@chmod 0755 "$(THEOS_STAGING_DIR)/DEBIAN/postinst"
+
 after-install::
 	install.exec "D=/var/mobile/Library/Preferences/MiOS/debug; mkdir -p \"$$D\"; echo \"postinst ran $$(date)\" >> \"$$D/install.log\"; if [ -f /var/jb/usr/libexec/mios-bootstrap.sh ]; then sh /var/jb/usr/libexec/mios-bootstrap.sh; elif [ -f /usr/libexec/mios-bootstrap.sh ]; then sh /usr/libexec/mios-bootstrap.sh; else echo \"bootstrap script NOT found in /var/jb/usr/libexec or /usr/libexec\" >> \"$$D/install.log\"; fi; chown -R 501:501 \"$$D\" 2>/dev/null; killall -9 SpringBoard 2>/dev/null"
