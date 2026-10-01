@@ -71,13 +71,11 @@ static CFStringRef gcMGDeviceName     = NULL;   // DeviceName / marketing-name
 static CFStringRef gcMGProductVersion = NULL;   // ProductVersion             (iosVersion)
 static CFTypeRef (*gRealMGCopyAnswer)(CFStringRef) = NULL;  // captured before dlsym is hooked
 
-// Low-level OS-version strings, read via sysctl by CFNetwork / SDKs / Instagram et al. These are the
-// pieces the ObjC + MobileGestalt hooks miss, which is why a spoofed device still leaked the REAL iOS
-// version. All NULL = leave the real value untouched.
-static char     *gcOSProductVersion = NULL;   // kern.osproductversion  ("18.4")      <- the big one
-static char     *gcOSVersion        = NULL;   // kern.osversion         (build "22E240")
-static char     *gcOSRelease        = NULL;   // kern.osrelease / uname.release (Darwin "24.4.0")
-static BOOL      gcHasOSProductVersion = NO;   // so osproductversionextra can be blanked consistently
+// NOTE: we deliberately do NOT spoof the low-level OS sysctls (kern.osproductversion / kern.osversion /
+// kern.osrelease). Apps read those to pick a RUNTIME code path, not just to report a version — faking
+// them pushes Facebook/Instagram's pre-main init down an incompatible path and aborts it. The iOS
+// version the app REPORTS is covered by the UIDevice / NSProcessInfo / MGCopyAnswer hooks plus the
+// first-launch App Group wipe, which force the cached device header to be rebuilt from the spoof.
 
 // Defined lower down; used by the derivation helpers below.
 static NSString *derivedHex(NSString *seed, NSString *salt, NSUInteger length);
@@ -628,15 +626,6 @@ static int hook_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void
     if (name && gDeviceSpoofActive) {
         if (gcMachine && strcmp(name, "hw.machine") == 0) return replyCString(oldp, oldlenp, gcMachine);
         if (gcModel   && strcmp(name, "hw.model")   == 0) return replyCString(oldp, oldlenp, gcModel);
-        // OS version family — the canonical source apps read for the iOS version.
-        if (gcOSProductVersion && strcmp(name, "kern.osproductversion") == 0)
-            return replyCString(oldp, oldlenp, gcOSProductVersion);
-        if (gcHasOSProductVersion && strcmp(name, "kern.osproductversionextra") == 0)
-            return replyCString(oldp, oldlenp, "");   // no rapid-security-response suffix on a clean release
-        if (gcOSVersion && strcmp(name, "kern.osversion") == 0)
-            return replyCString(oldp, oldlenp, gcOSVersion);
-        if (gcOSRelease && strcmp(name, "kern.osrelease") == 0)
-            return replyCString(oldp, oldlenp, gcOSRelease);
         if ((gcMemsize || gcCPU) && oldp && oldlenp) {
             int ret = orig_sysctlbyname(name, oldp, oldlenp, newp, newlen);
             if (ret != 0) return ret;
@@ -664,15 +653,9 @@ static int hook_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, vo
 
 static int hook_uname(struct utsname *buf) {
     int ret = orig_uname(buf);
-    if (ret != 0 || !buf || !gDeviceSpoofActive) return ret;
-    if (gcMachine) {
-        strncpy(buf->machine, gcMachine, sizeof(buf->machine) - 1);
-        buf->machine[sizeof(buf->machine) - 1] = '\0';
-    }
-    if (gcOSRelease) {   // Darwin kernel version, kept consistent with the spoofed iOS version
-        strncpy(buf->release, gcOSRelease, sizeof(buf->release) - 1);
-        buf->release[sizeof(buf->release) - 1] = '\0';
-    }
+    if (ret != 0 || !buf || !gDeviceSpoofActive || !gcMachine) return ret;
+    strncpy(buf->machine, gcMachine, sizeof(buf->machine) - 1);
+    buf->machine[sizeof(buf->machine) - 1] = '\0';
     return ret;
 }
 
@@ -739,53 +722,6 @@ static CFStringRef retainedCF(NSString *s) {
     return (__bridge_retained CFStringRef)[s copy];
 }
 
-// Apple build number for a marketing iOS version (e.g. "18.4" -> "22E240"). Only the releases the
-// container editor can pick are mapped; an unmapped version returns nil and we leave the real build
-// in place (a wrong product version is far more damaging than a build that simply isn't overridden).
-static NSString *miosBuildForIOSVersion(NSString *ver) {
-    if (ver.length == 0) return nil;
-    static NSDictionary *map = nil;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        map = @{
-            // iOS 18
-            @"18.0": @"22A3354", @"18.0.1": @"22A3370", @"18.1": @"22B83", @"18.1.1": @"22B91",
-            @"18.1.2": @"22B101", @"18.2": @"22C152", @"18.2.1": @"22C161", @"18.3": @"22D63",
-            @"18.3.1": @"22D72", @"18.3.2": @"22D82", @"18.4": @"22E240", @"18.4.1": @"22E252",
-            @"18.5": @"22F76",
-            // iOS 17
-            @"17.0": @"21A327", @"17.0.1": @"21A340", @"17.0.2": @"21A351", @"17.0.3": @"21A360",
-            @"17.1": @"21B74", @"17.1.1": @"21B91", @"17.1.2": @"21B101", @"17.2": @"21C62",
-            @"17.2.1": @"21C66", @"17.3": @"21D50", @"17.3.1": @"21D61", @"17.4": @"21E219",
-            @"17.4.1": @"21E236", @"17.5": @"21F79", @"17.5.1": @"21F90", @"17.6": @"21G80",
-            @"17.6.1": @"21G93", @"17.7": @"21H16",
-            // iOS 16
-            @"16.0": @"20A362", @"16.0.1": @"20A371", @"16.0.2": @"20A380", @"16.0.3": @"20A392",
-            @"16.1": @"20B82", @"16.1.1": @"20B101", @"16.1.2": @"20B110", @"16.2": @"20C65",
-            @"16.3": @"20D47", @"16.3.1": @"20D67", @"16.4": @"20E247", @"16.4.1": @"20E252",
-            @"16.5": @"20F66", @"16.5.1": @"20F75", @"16.6": @"20G75", @"16.6.1": @"20G81",
-            @"16.7": @"20H19", @"16.7.1": @"20H30", @"16.7.2": @"20H115",
-            // iOS 15
-            @"15.0": @"19A346", @"15.0.1": @"19A348", @"15.0.2": @"19A404", @"15.1": @"19B74",
-            @"15.1.1": @"19B81", @"15.2": @"19C56", @"15.2.1": @"19C63", @"15.3": @"19D50",
-            @"15.3.1": @"19D52", @"15.4": @"19E241", @"15.4.1": @"19E258", @"15.5": @"19F77",
-            @"15.6": @"19G71", @"15.6.1": @"19G82", @"15.7": @"19H12", @"15.8": @"19H364",
-        };
-    });
-    return map[ver];
-}
-
-// Darwin kernel release for a marketing iOS version. The relationship is stable: Darwin major =
-// iOS major + 6, Darwin minor = iOS minor, patch 0 (iOS 18.4 -> 24.4.0, iOS 17.5 -> 23.5.0).
-static NSString *miosDarwinForIOSVersion(NSString *ver) {
-    NSArray *parts = [ver componentsSeparatedByString:@"."];
-    if (parts.count == 0) return nil;
-    NSInteger major = [parts[0] integerValue];
-    if (major < 10) return nil;
-    NSInteger minor = parts.count > 1 ? [parts[1] integerValue] : 0;
-    return [NSString stringWithFormat:@"%ld.%ld.0", (long)(major + 6), (long)minor];
-}
-
 static void miosBuildSpoofCache(void) {
     gDeviceSpoofActive = deviceSpoofEnabled();
     if (gDeviceSpoofActive) {
@@ -797,15 +733,6 @@ static void miosBuildSpoofCache(void) {
         gcMGHWModel        = retainedCF(spoofStr(@"hwModel"));
         gcMGDeviceName     = retainedCF(spoofStr(@"deviceName"));
         gcMGProductVersion = retainedCF(spoofStr(@"iosVersion"));
-
-        // Low-level OS-version sysctls (the previously-missed leak path).
-        NSString *iosVer = spoofStr(@"iosVersion");
-        if (iosVer.length > 0) {
-            gcOSProductVersion = dupCString(iosVer);
-            gcHasOSProductVersion = (gcOSProductVersion != NULL);
-            gcOSVersion = dupCString(miosBuildForIOSVersion(iosVer));   // nil -> leave real build
-            gcOSRelease = dupCString(miosDarwinForIOSVersion(iosVer));  // keep Darwin consistent
-        }
     }
     if (wifiSpoofActive()) {
         NSString *ssid  = derivedSSID();
@@ -922,22 +849,13 @@ static void miosResetContainerCachesOnce(NSString *uuid) {
                         [NSString stringWithFormat:@"Library/.mios_init_%@", uuid]];
     if ([fm fileExistsAtPath:marker]) return;   // already initialised this container
 
-    // Files we must NOT delete: the daemon bootstrap and our own init markers (prefixes below).
-    BOOL (^isOurs)(NSString *) = ^BOOL(NSString *name) {
-        return [name hasPrefix:@".mios_init_"] || [name hasPrefix:@"com.mios."];
-    };
-
-    // 1. The app's own sandbox: Documents + tmp wholesale; Library per-subdir so we can spare our files.
-    miosWipeDirContents(fm, [home stringByAppendingPathComponent:@"Documents"], nil);
-    miosWipeDirContents(fm, [home stringByAppendingPathComponent:@"tmp"], nil);
-    for (NSString *item in [fm contentsOfDirectoryAtPath:[home stringByAppendingPathComponent:@"Library"] error:nil] ?: @[]) {
-        if ([item isEqualToString:@"Preferences"]) {
-            // Clear cached defaults but keep our bootstrap/marker plists.
-            miosWipeDirContents(fm, [home stringByAppendingPathComponent:@"Library/Preferences"], isOurs);
-            continue;
-        }
-        if (isOurs(item)) continue;   // the .mios_init_<uuid> marker lives directly in Library
-        [fm removeItemAtPath:[[home stringByAppendingPathComponent:@"Library"] stringByAppendingPathComponent:item] error:nil];
+    // 1. The app's own cache/identity stores. We clear ONLY well-known caches, never Documents or
+    //    Library wholesale: the app's pre-main init reads files under its sandbox, and deleting a
+    //    directory out from under it aborts startup. A genuinely fresh container has nothing else
+    //    here anyway — the identity that actually persists lives in the App Group + keychain (below).
+    for (NSString *sub in @[@"tmp", @"Library/Caches", @"Library/Cookies",
+                            @"Library/WebKit", @"Library/HTTPStorages"]) {
+        miosWipeDirContents(fm, [home stringByAppendingPathComponent:sub], nil);
     }
 
     // 2. Cookies, URL cache and WebKit website data (identity often hides in cookies / local storage).
@@ -964,7 +882,7 @@ static void miosResetContainerCachesOnce(NSString *uuid) {
         } @catch (__unused id e) {}
         NSURL *gurl = [fm containerURLForSecurityApplicationGroupIdentifier:group];
         if (gurl) {
-            for (NSString *sub in @[@"Library/Preferences", @"Library/Caches", @"Library/Application Support", @"Documents"]) {
+            for (NSString *sub in @[@"Library/Preferences", @"Library/Caches", @"Library/Application Support"]) {
                 miosWipeDirContents(fm, [gurl.path stringByAppendingPathComponent:sub], nil);
             }
         }
