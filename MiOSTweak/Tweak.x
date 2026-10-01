@@ -56,7 +56,6 @@ static NSString *gContainerUUID = nil;         // seed for deterministic per-con
 static NSString *gKcPrefix = nil;              // per-container keychain namespace prefix
 static BOOL gKeychainIsolation = YES;          // default on: separate keychain per container (sessions)
 static BOOL gGroupRedirectActive = NO;         // per-container App Group redirection active
-static BOOL gSystemSpoofMode = NO;             // active-container-drives-system (Settings) path
 
 // Cached, allocation-free spoof values (built once in the constructor; owned for process lifetime).
 // The low-level C hooks (sysctl / uname / CNCopy...) read ONLY these, never ObjC.
@@ -529,7 +528,84 @@ static OSStatus new_SecItemAdd(CFDictionaryRef attributes, CFTypeRef *result) {
     return status;
 }
 
+// Does this access group hold the cross-app device identity shared by the Facebook/Instagram family?
+static BOOL kcIsSharedIdentityGroup(id agrp) {
+    if (![agrp isKindOfClass:[NSString class]]) return NO;
+    NSString *g = agrp;
+    return ([g containsString:@"facebook"] || [g containsString:@"burbn"] ||
+            [g containsString:@"instagram"] || [g containsString:@"family"]);
+}
+
+// Does the query pin down a specific item via one of the fields we namespace? If so, normal prefixing
+// already isolates it and we leave it alone.
+static BOOL kcQueryNamesPrimaryKey(NSDictionary *q) {
+    for (id key in kcPrefixedKeys()) {
+        if ([q[key] isKindOfClass:[NSString class]]) return YES;
+    }
+    return NO;
+}
+
+// A blanket enumeration of a shared identity access group (class + access group, but NO service /
+// account / label) would return EVERY container's device-id backup plus the original device's — that
+// is exactly how the old iPhone-X device-id gets resurrected in a freshly-logged-in container. Return
+// ONLY this container's own (prefixed) items, so: (a) the old identity can't leak in, and (b) the app
+// still finds the device-id it wrote itself, so it does NOT regenerate one every launch. Returns YES
+// when it has fully handled the call. Kill-switchable from Filza (.../MiOS/disable).
+static BOOL kcHandleBlanketIdentityQuery(CFDictionaryRef query, CFTypeRef *result, OSStatus *outStatus) {
+    if (!(gKeychainIsolation && gKcPrefix.length > 0 && !miosRedirectDisabled())) return NO;
+    NSDictionary *q = (__bridge NSDictionary *)query;
+    if (![q isKindOfClass:[NSDictionary class]]) return NO;
+    if (q[(__bridge id)kSecClass] != (__bridge id)kSecClassGenericPassword &&
+        ![q[(__bridge id)kSecClass] isEqual:(__bridge id)kSecClassGenericPassword]) return NO;
+    if (!kcIsSharedIdentityGroup(q[(__bridge id)kSecAttrAccessGroup])) return NO;
+    if (kcQueryNamesPrimaryKey(q)) return NO;   // specific lookups go through normal prefixing
+
+    // Re-run the query asking for attributes + data for ALL matches, so we can filter by our prefix
+    // regardless of what the caller asked to receive.
+    NSMutableDictionary *probe = [q mutableCopy];
+    probe[(__bridge id)kSecReturnAttributes] = @YES;
+    probe[(__bridge id)kSecReturnData] = @YES;
+    probe[(__bridge id)kSecMatchLimit] = (__bridge id)kSecMatchLimitAll;
+    CFTypeRef raw = NULL;
+    OSStatus st = orig_SecItemCopyMatching((__bridge CFDictionaryRef)probe, &raw);
+    if (st != errSecSuccess || raw == NULL) {
+        if (raw) CFRelease(raw);
+        *outStatus = errSecItemNotFound; *result = NULL; return YES;
+    }
+    NSArray *items = [(__bridge id)raw isKindOfClass:[NSArray class]]
+                     ? (__bridge NSArray *)raw : @[(__bridge id)raw];
+
+    BOOL wantAttrs = [q[(__bridge id)kSecReturnAttributes] boolValue];
+    BOOL wantData  = [q[(__bridge id)kSecReturnData] boolValue];
+    BOOL limitAll  = [q[(__bridge id)kSecMatchLimit] isEqual:(__bridge id)kSecMatchLimitAll];
+
+    NSMutableArray *out = [NSMutableArray array];
+    for (id it in items) {
+        if (![it isKindOfClass:[NSDictionary class]]) continue;
+        BOOL mine = NO;
+        for (id key in kcPrefixedKeys()) {
+            id v = it[key];
+            if ([v isKindOfClass:[NSString class]] && [v hasPrefix:gKcPrefix]) { mine = YES; break; }
+        }
+        if (!mine) continue;                       // drop other containers' / the original's items
+        id stripped = kcStripObject(it);           // remove our prefix before handing back
+        if (wantAttrs && wantData)      [out addObject:stripped];
+        else if (wantData)              { id d = ((NSDictionary *)stripped)[(__bridge id)kSecValueData]; if (d) [out addObject:d]; }
+        else if (wantAttrs)             { NSMutableDictionary *a = [stripped mutableCopy]; [a removeObjectForKey:(__bridge id)kSecValueData]; [out addObject:a]; }
+        else                            [out addObject:stripped];
+    }
+    CFRelease(raw);
+
+    if (out.count == 0) { *outStatus = errSecItemNotFound; *result = NULL; return YES; }
+    *result = limitAll ? (__bridge_retained CFTypeRef)out
+                       : (__bridge_retained CFTypeRef)out.firstObject;
+    *outStatus = errSecSuccess;
+    return YES;
+}
+
 static OSStatus new_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result) {
+    OSStatus handled = errSecSuccess;
+    if (kcHandleBlanketIdentityQuery(query, result, &handled)) return handled;
     BOOL modified = NO;
     NSDictionary *copy = kcApplyPrefix(query, &modified);
     if (!modified) return orig_SecItemCopyMatching(query, result);
@@ -683,30 +759,21 @@ static void *new_dlsym(void *handle, const char *symbol) {
 // (CoreTelephony, Shadow, the shared cache) are matched by neither test and left untouched, so nothing
 // outside the app is affected and the real libMobileGestalt function is never patched. fishhook only
 // rewrites import pointers inside THIS process, so other apps/daemons are unaffected either way.
-static void miosRebindMG(BOOL allImages) {
-    struct rebinding rb = { "MGCopyAnswer", (void *)mios_MGCopyAnswer, NULL };
-    uint32_t count = _dyld_image_count();
-    for (uint32_t i = 0; i < count; i++) {
-        const struct mach_header *hdr = _dyld_get_image_header(i);
-        const char *name = _dyld_get_image_name(i);
-        if (!hdr) continue;
-        if (allImages) {
-            // SYSTEM-spoof (Settings): the About pane reads the model name from MGCopyAnswer bound
-            // inside a SYSTEM framework, not the app's own binary, so we must rebind every image's
-            // import pointer. This is still safe: fishhook only swaps the caller's import slot (never
-            // patches libMobileGestalt's code), and mios_MGCopyAnswer passes every key we don't spoof
-            // straight through to the real function, so CoreTelephony's baseband probes stay correct.
-            // We skip libMobileGestalt's own image so its internal calls resolve normally.
-            if (name && strstr(name, "libMobileGestalt")) continue;
-        } else {
-            // Container apps: rebind ONLY the app's own binaries (main exe + embedded frameworks such
-            // as FBSharedFramework). System frameworks are left untouched — the tested behavior.
-            BOOL isMain = (hdr->filetype == MH_EXECUTE);
-            BOOL isAppImage = (name != NULL && strstr(name, ".app/") != NULL);
-            if (!(isMain || isAppImage)) continue;
-        }
-        rebind_symbols_image((void *)hdr, _dyld_get_image_vmaddr_slide(i), &rb, 1);
-    }
+// Rebind the MGCopyAnswer import pointer to ours in EVERY image — present AND future. fishhook's
+// rebind_symbols() rebinds all currently-loaded images and registers a dyld add-image callback, so a
+// framework loaded LATER (a Settings pane, an Instagram module loaded on demand) is rebound too. Our
+// previous one-shot scan in the constructor missed those late images, which is why Settings' "Model
+// Name" (read from a system framework bound after launch) and some app reads slipped through. This is
+// the same technique shipping model-spoofers (e.g. CyPwn FakeModel) use. It stays safe: fishhook only
+// swaps the caller's import slot — it never patches libMobileGestalt's code — and mios_MGCopyAnswer
+// passes every key we don't spoof straight through to the real function, so CoreTelephony's baseband
+// probes and jailbreak-bypass checks keep seeing real values.
+static void miosInstallMGRebind(void) {
+    static struct rebinding rb;   // keep alive for the lifetime of the add-image callback
+    rb.name = "MGCopyAnswer";
+    rb.replacement = (void *)mios_MGCopyAnswer;
+    rb.replaced = NULL;
+    rebind_symbols(&rb, 1);
 }
 
 // MARK: - Derived unique-device identifiers (stable per container)
@@ -912,7 +979,6 @@ static void miosRedirectLog(NSString *line) {
                     [sysSpoof[@"deviceSpoofEnabled"] boolValue]) {
                     gSpoof = sysSpoof;
                     systemSpoofMode = YES;
-                    gSystemSpoofMode = YES;
                 }
             }
             if (!systemSpoofMode) return;   // not a container app and not a system-spoof target
@@ -979,7 +1045,7 @@ static void miosRedirectLog(NSString *line) {
                 // system frameworks like CoreTelephony are never touched, and fishhook is per-process.
                 // Honour the kill-switch so it can be turned off from Filza without a reboot.
                 if (gRealMGCopyAnswer && !miosRedirectDisabled()) {
-                    miosRebindMG(gSystemSpoofMode);
+                    miosInstallMGRebind();
                 }
             }
         }
