@@ -754,6 +754,28 @@ static BOOL miosRedirectDisabled(void) {
     return disabled;
 }
 
+// Diagnostic: append a line once per unique message to a per-app log in the central MiOS debug dir
+// (libSandy grants access). Lets us see WHERE the app keeps its device-id without a terminal.
+static void miosRedirectLog(NSString *line) {
+    static NSMutableSet *seen = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ seen = [NSMutableSet set]; });
+    @synchronized (seen) {
+        if ([seen containsObject:line]) return;
+        [seen addObject:line];
+    }
+    @try {
+        NSString *dir = @"/var/mobile/Library/Preferences/MiOS/debug";
+        NSString *path = [dir stringByAppendingPathComponent:
+            [NSString stringWithFormat:@"redirect_%@.log", gBundleID ?: @"app"]];
+        NSString *entry = [NSString stringWithFormat:@"%@  %@\n", [NSDate date], line];
+        [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
+        if (!fh) { [entry writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil]; }
+        else { @try { [fh seekToEndOfFile]; [fh writeData:[entry dataUsingEncoding:NSUTF8StringEncoding]]; } @catch (__unused id e) {} [fh closeFile]; }
+    } @catch (__unused id e) {}
+}
+
 %group GroupRedirectHooks
 
 %hook NSUserDefaults
@@ -762,10 +784,27 @@ static BOOL miosRedirectDisabled(void) {
     if (gGroupRedirectActive && gContainerUUID.length > 0 &&
         [suiteName isKindOfClass:[NSString class]] &&
         [suiteName hasPrefix:@"group."] && ![suiteName containsString:@"__mios_"]) {
+        miosRedirectLog([NSString stringWithFormat:@"defaults suite=%@ -> scoped", suiteName]);
         NSString *scoped = [NSString stringWithFormat:@"%@__mios_%@", suiteName, gContainerUUID];
         return %orig(scoped);
     }
     return %orig;
+}
+
+// Diagnostic only: record where the app stores device-id-ish values (which domain/key), so we can see
+// if its identity lives in standardUserDefaults (private container — NOT covered by the group redirect)
+// vs a group suite. Does not change behaviour.
+- (void)setObject:(id)value forKey:(NSString *)key {
+    if (gGroupRedirectActive && [key isKindOfClass:[NSString class]]) {
+        NSString *lk = key.lowercaseString;
+        if ([lk containsString:@"device"] || [lk containsString:@"guid"] || [lk containsString:@"uuid"] ||
+            [lk containsString:@"phone_id"] || [lk containsString:@"pigeon"] || [lk containsString:@"familydevice"] ||
+            [lk containsString:@"deviceid"] || [lk containsString:@"device_id"]) {
+            miosRedirectLog([NSString stringWithFormat:@"setDefault key=%@ type=%@", key,
+                [value isKindOfClass:[NSString class]] ? value : NSStringFromClass([value class])]);
+        }
+    }
+    %orig;
 }
 
 %end
@@ -775,6 +814,7 @@ static BOOL miosRedirectDisabled(void) {
 - (NSURL *)containerURLForSecurityApplicationGroupIdentifier:(NSString *)groupID {
     NSURL *real = %orig;
     if (!gGroupRedirectActive || gContainerUUID.length == 0 || !real) return real;
+    miosRedirectLog([NSString stringWithFormat:@"groupURL id=%@ -> scoped", groupID]);
     NSURL *scoped = [[real URLByAppendingPathComponent:@"___MiOS_Containers" isDirectory:YES]
                           URLByAppendingPathComponent:gContainerUUID isDirectory:YES];
     [[NSFileManager defaultManager] createDirectoryAtURL:scoped withIntermediateDirectories:YES
