@@ -285,11 +285,14 @@ static void miosDumpClassMethods(const char *clsName, NSString *tag) {
         if (!c) { supLog(tag, [NSString stringWithFormat:@"class %s NOT found", clsName]); return; }
         unsigned int mc = 0; Method *ms = class_copyMethodList(c, &mc);
         NSMutableArray *sels = [NSMutableArray array];
-        for (unsigned int j = 0; j < mc && sels.count < 80; j++)
-            [sels addObject:@(sel_getName(method_getName(ms[j])))];
+        for (unsigned int j = 0; j < mc && sels.count < 80; j++) {
+            const char *sn = sel_getName(method_getName(ms[j]));
+            const char *ty = method_getTypeEncoding(ms[j]);   // ABI signature (incl. block layout)
+            [sels addObject:[NSString stringWithFormat:@"%s %s", sn, ty ?: ""]];
+        }
         if (ms) free(ms);
-        supLog(tag, [NSString stringWithFormat:@"class %s methods: %@", clsName,
-                     [sels componentsJoinedByString:@", "]]);
+        supLog(tag, [NSString stringWithFormat:@"class %s methods:\n  %@", clsName,
+                     [sels componentsJoinedByString:@"\n  "]]);
     } @catch (__unused id e) {}
 }
 
@@ -436,8 +439,31 @@ static void initSecurityd(void) {
 }
 
 // ---- Phase 4: lsd (IDFV per container) ------------------------------------------------------------
+// The real vendor-id (IDFV) method, found in the Crane binary's selector table. Hook it to return a
+// per-container vendor id. This build LOGS the method's ABI type encoding (the reply block's layout)
+// and the resolved container, then calls %orig unchanged — so it is safe and tells us the exact reply
+// signature to substitute with next (calling a block with the wrong arity would crash lsd).
+@interface _LSDDeviceIdentifierClient : NSObject
+@end
+
+%group LSD_Client
+%hook _LSDDeviceIdentifierClient
+- (void)readDeviceVendorIdentifierFromApplicationWithIdentifier:(id)appID reply:(id)reply {
+    @try {
+        Method m = class_getInstanceMethod([self class], _cmd);
+        const char *ty = m ? method_getTypeEncoding(m) : "?";
+        NSString *bid = [appID isKindOfClass:[NSString class]] ? (NSString *)appID : [appID description];
+        NSString *uuid = [bid isKindOfClass:[NSString class]] ? miosActiveContainerForBundle(bid) : nil;
+        supLog(@"lsd", [NSString stringWithFormat:@"readVendorID app=%@ container=%@ reply_type=%s",
+               bid, uuid ?: @"(default)", ty ?: "?"]);
+    } @catch (__unused id e) {}
+    %orig;
+}
+%end
+%end
+
 static void initLsd(void) {
-    supLog(@"lsd", @"[init] MiOSSupport up in lsd (discovery only — closed source, need real API)");
+    supLog(@"lsd", @"[init] MiOSSupport up in lsd (discovery + vendor-id selector probe)");
     // Full method lists of the exact classes Crane works with, so lsd can be implemented precisely for
     // this iOS (names/selectors are registered dynamically and not extractable from the Crane binary).
     const char *lsClasses[] = { "_LSDDeviceIdentifierClient", "_LSDeviceIdentifierManager",
@@ -462,6 +488,13 @@ static void initLsd(void) {
             supLog(@"lsd", @"_LSDDeviceIdentifierProtocol NOT found");
         }
     } @catch (__unused id e) {}
+
+    if (objc_getClass("_LSDDeviceIdentifierClient")) {
+        %init(LSD_Client);
+        supLog(@"lsd", @"[init] _LSDDeviceIdentifierClient readVendorID probe installed");
+    } else {
+        supLog(@"lsd", @"_LSDDeviceIdentifierClient NOT found — no hook (fail-safe)");
+    }
 }
 
 // ---- entry point -----------------------------------------------------------------------------------
