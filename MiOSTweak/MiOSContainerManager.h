@@ -15,4 +15,11 @@
 
 // Per-container spoof settings (device model, identifiers, GPS); empty for the default container.
 - (NSDictionary *)spoofPrefsForBundleID:(NSString *)bundleID;
+
+// System-wide ("active container drives the system identity") spoof for selected SYSTEM apps such as
+// Settings (com.apple.Preferences). Returns the active container's spoof dict when system spoof is
+// enabled AND this bundle is an allow-listed system target; nil otherwise. This path installs ONLY
+// the in-process device/MobileGestalt/sysctl hooks — never the keychain or App-Group redirect, and it
+// NEVER rewrites the on-disk MobileGestalt cache (that can bootloop the device).
+- (NSDictionary *)activeSystemSpoofForBundleID:(NSString *)bundleID;
 @end

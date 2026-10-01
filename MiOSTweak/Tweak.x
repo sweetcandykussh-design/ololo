@@ -56,6 +56,7 @@ static NSString *gContainerUUID = nil;         // seed for deterministic per-con
 static NSString *gKcPrefix = nil;              // per-container keychain namespace prefix
 static BOOL gKeychainIsolation = YES;          // default on: separate keychain per container (sessions)
 static BOOL gGroupRedirectActive = NO;         // per-container App Group redirection active
+static BOOL gSystemSpoofMode = NO;             // active-container-drives-system (Settings) path
 
 // Cached, allocation-free spoof values (built once in the constructor; owned for process lifetime).
 // The low-level C hooks (sysctl / uname / CNCopy...) read ONLY these, never ObjC.
@@ -682,18 +683,29 @@ static void *new_dlsym(void *handle, const char *symbol) {
 // (CoreTelephony, Shadow, the shared cache) are matched by neither test and left untouched, so nothing
 // outside the app is affected and the real libMobileGestalt function is never patched. fishhook only
 // rewrites import pointers inside THIS process, so other apps/daemons are unaffected either way.
-static void miosRebindMGInAppImages(void) {
+static void miosRebindMG(BOOL allImages) {
     struct rebinding rb = { "MGCopyAnswer", (void *)mios_MGCopyAnswer, NULL };
     uint32_t count = _dyld_image_count();
     for (uint32_t i = 0; i < count; i++) {
         const struct mach_header *hdr = _dyld_get_image_header(i);
         const char *name = _dyld_get_image_name(i);
         if (!hdr) continue;
-        BOOL isMain = (hdr->filetype == MH_EXECUTE);
-        BOOL isAppImage = (name != NULL && strstr(name, ".app/") != NULL);  // main exe + embedded frameworks
-        if (isMain || isAppImage) {
-            rebind_symbols_image((void *)hdr, _dyld_get_image_vmaddr_slide(i), &rb, 1);
+        if (allImages) {
+            // SYSTEM-spoof (Settings): the About pane reads the model name from MGCopyAnswer bound
+            // inside a SYSTEM framework, not the app's own binary, so we must rebind every image's
+            // import pointer. This is still safe: fishhook only swaps the caller's import slot (never
+            // patches libMobileGestalt's code), and mios_MGCopyAnswer passes every key we don't spoof
+            // straight through to the real function, so CoreTelephony's baseband probes stay correct.
+            // We skip libMobileGestalt's own image so its internal calls resolve normally.
+            if (name && strstr(name, "libMobileGestalt")) continue;
+        } else {
+            // Container apps: rebind ONLY the app's own binaries (main exe + embedded frameworks such
+            // as FBSharedFramework). System frameworks are left untouched — the tested behavior.
+            BOOL isMain = (hdr->filetype == MH_EXECUTE);
+            BOOL isAppImage = (name != NULL && strstr(name, ".app/") != NULL);
+            if (!(isMain || isAppImage)) continue;
         }
+        rebind_symbols_image((void *)hdr, _dyld_get_image_vmaddr_slide(i), &rb, 1);
     }
 }
 
@@ -880,18 +892,37 @@ static void miosRedirectLog(NSString *line) {
             gSpoof = [boot[@"spoof"] isKindOfClass:[NSDictionary class]] ? boot[@"spoof"] : @{};
         } else {
             // FALLBACK: read the central MiOS prefs (needs libSandy + the global enable switch).
-            if (!isMiOSEnabled()) return;
-            MiOSContainerManager *mgr = [MiOSContainerManager sharedManager];
-            uuid = [mgr activeContainerUUIDForBundleID:gBundleID];
-            if (uuid) gSpoof = [mgr spoofPrefsForBundleID:gBundleID];
+            if (isMiOSEnabled()) {
+                MiOSContainerManager *mgr = [MiOSContainerManager sharedManager];
+                uuid = [mgr activeContainerUUIDForBundleID:gBundleID];
+                if (uuid) gSpoof = [mgr spoofPrefsForBundleID:gBundleID];
+            }
         }
 
-        // Only container apps go further. Keychain isolation is always on so sessions persist.
-        if (!uuid) return;
-        gContainerUUID = uuid;
-        gKeychainIsolation = YES;
-        gKcPrefix = [NSString stringWithFormat:@"__mios_%@_", uuid];
-        miosInitKeychainNamespace();
+        // Resolve the mode. Container apps get full isolation (keychain + App Group redirect). A
+        // selected SYSTEM app (Settings) with no container of its own gets the "active container drives
+        // the system identity" path: ONLY the in-process device/MG/sysctl hooks, so Settings → About
+        // shows the spoofed device. We never rewrite the on-disk MobileGestalt cache (bootloop risk).
+        BOOL systemSpoofMode = NO;
+        if (!uuid) {
+            if (isMiOSEnabled() && !miosRedirectDisabled()) {
+                NSDictionary *sysSpoof =
+                    [[MiOSContainerManager sharedManager] activeSystemSpoofForBundleID:gBundleID];
+                if ([sysSpoof isKindOfClass:[NSDictionary class]] &&
+                    [sysSpoof[@"deviceSpoofEnabled"] boolValue]) {
+                    gSpoof = sysSpoof;
+                    systemSpoofMode = YES;
+                    gSystemSpoofMode = YES;
+                }
+            }
+            if (!systemSpoofMode) return;   // not a container app and not a system-spoof target
+        } else {
+            // Container app: keychain isolation is always on so sessions persist per container.
+            gContainerUUID = uuid;
+            gKeychainIsolation = YES;
+            gKcPrefix = [NSString stringWithFormat:@"__mios_%@_", uuid];
+            miosInitKeychainNamespace();
+        }
 
         if (!gSpoof) gSpoof = @{};
 
@@ -948,7 +979,7 @@ static void miosRedirectLog(NSString *line) {
                 // system frameworks like CoreTelephony are never touched, and fishhook is per-process.
                 // Honour the kill-switch so it can be turned off from Filza without a reboot.
                 if (gRealMGCopyAnswer && !miosRedirectDisabled()) {
-                    miosRebindMGInAppImages();
+                    miosRebindMG(gSystemSpoofMode);
                 }
             }
         }

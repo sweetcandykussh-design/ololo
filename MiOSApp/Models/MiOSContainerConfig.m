@@ -119,6 +119,15 @@ static NSString *const kContainersPlistPath = @"/var/mobile/Library/Preferences/
         }
     }
     [fm removeItemAtPath:[[self class] spoofPrefsPathForUUID:self.identifier] error:nil];
+
+    // If this container was driving the system identity (Settings), stop doing so.
+    NSString *systemSpoofPath = @"/var/mobile/Library/Preferences/MiOS/com.mios.systemspoof.plist";
+    NSMutableDictionary *sys = [NSMutableDictionary dictionaryWithContentsOfFile:systemSpoofPath];
+    if ([sys[@"uuid"] isEqualToString:self.identifier]) {
+        sys[@"enabled"] = @NO;
+        [sys writeToFile:systemSpoofPath atomically:YES];
+    }
+
     // The real OS container is owned by the daemon; ask it to destroy this one.
     [MiOSContainerDaemonClient deleteContainer:self.identifier forApps:self.apps];
 
@@ -311,6 +320,22 @@ static NSString *const kContainersPlistPath = @"/var/mobile/Library/Preferences/
 
     containerPrefs[@"activeContainers"] = activeContainers;
     [containerPrefs writeToFile:containerPrefsPath atomically:YES];
+
+    // Point the SYSTEM identity (Settings → About, read by the tweak inside com.apple.Preferences) at
+    // this container's device when device spoof is on. This is purely an in-process hook target — it
+    // does NOT rewrite the on-disk MobileGestalt cache, so there is no bootloop risk.
+    NSString *systemSpoofPath = [base stringByAppendingPathComponent:@"com.mios.systemspoof.plist"];
+    if (self.deviceSpoofEnabled) {
+        [@{@"enabled": @YES, @"uuid": self.identifier ?: @""}
+            writeToFile:systemSpoofPath atomically:YES];
+    } else {
+        // This container does not spoof the device; stop driving the system identity from it.
+        NSMutableDictionary *sys = [NSMutableDictionary dictionaryWithContentsOfFile:systemSpoofPath];
+        if ([sys[@"uuid"] isEqualToString:self.identifier]) {
+            sys[@"enabled"] = @NO;
+            [sys writeToFile:systemSpoofPath atomically:YES];
+        }
+    }
 
     // Ask the privileged daemon to make this the active REAL container for each app (minting it the
     // first time) and relaunch the app into it. This is the actual file isolation (Crane model).

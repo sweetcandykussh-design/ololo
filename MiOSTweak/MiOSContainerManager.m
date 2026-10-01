@@ -59,4 +59,30 @@ static NSString *const kMiOSContainerPrefsFile = @"com.mios.containerprefs.plist
     return [NSDictionary dictionaryWithContentsOfFile:path] ?: @{};
 }
 
+- (NSDictionary *)activeSystemSpoofForBundleID:(NSString *)bundleID {
+    if (bundleID.length == 0) return nil;
+
+    // The app writes this when a container becomes active: { enabled, uuid, bundles? }.
+    NSString *sysPath = [kMiOSBasePath stringByAppendingPathComponent:@"com.mios.systemspoof.plist"];
+    NSDictionary *sys = [NSDictionary dictionaryWithContentsOfFile:sysPath];
+    if (![sys isKindOfClass:[NSDictionary class]] || ![sys[@"enabled"] boolValue]) return nil;
+
+    // Allow-list of SYSTEM bundles we are willing to spoof. Default: Settings only (lowest blast
+    // radius). The app may extend it via the "bundles" array in the plist.
+    NSMutableSet *targets = [NSMutableSet setWithObject:@"com.apple.Preferences"];
+    NSArray *extra = sys[@"bundles"];
+    if ([extra isKindOfClass:[NSArray class]]) [targets addObjectsFromArray:extra];
+    if (![targets containsObject:bundleID]) return nil;
+
+    NSString *uuid = sys[@"uuid"];
+    if (![uuid isKindOfClass:[NSString class]] || uuid.length == 0) return nil;
+
+    NSString *spoofPath = [[[kMiOSBasePath stringByAppendingPathComponent:@"spoof"]
+                            stringByAppendingPathComponent:uuid]
+                           stringByAppendingPathExtension:@"plist"];
+    NSDictionary *spoof = [NSDictionary dictionaryWithContentsOfFile:spoofPath];
+    if (![spoof isKindOfClass:[NSDictionary class]]) return nil;
+    return spoof;
+}
+
 @end
