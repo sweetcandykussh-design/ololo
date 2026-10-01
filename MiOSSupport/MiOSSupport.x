@@ -73,8 +73,15 @@ static BOOL miosSafeMode(void) {
 // ".txt" because Filza appends it by default when creating a file.
 static BOOL miosFlagExists(NSString *flag) {
     NSFileManager *fm = [NSFileManager defaultManager];
-    NSString *base = [kMiOSBase stringByAppendingPathComponent:flag];
-    return [fm fileExistsAtPath:base] || [fm fileExistsAtPath:[base stringByAppendingPathExtension:@"txt"]];
+    // Accept the flag in MiOS/ or MiOS/debug/ (people often drop it next to the logs), with or without
+    // a trailing .txt (Filza appends it).
+    NSArray *dirs = @[kMiOSBase, [kMiOSBase stringByAppendingPathComponent:@"debug"]];
+    for (NSString *d in dirs) {
+        NSString *base = [d stringByAppendingPathComponent:flag];
+        if ([fm fileExistsAtPath:base]) return YES;
+        if ([fm fileExistsAtPath:[base stringByAppendingPathExtension:@"txt"]]) return YES;
+    }
+    return NO;
 }
 static BOOL miosDaemonEnabled(NSString *shortName) {
     if (miosFlagExists(@"enable_daemons")) return YES;
