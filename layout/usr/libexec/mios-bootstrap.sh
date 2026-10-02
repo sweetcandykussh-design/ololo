@@ -16,32 +16,48 @@ mkdir -p "$LOGDIR"
 # detached guarantees it happens. Gated on enable_daemons so a default install never touches a daemon.
 if [ -f "$BASE/enable_daemons" ]; then
   RS="$BASE/.mios-restart.sh"
+  # NOTE: this logs to its OWN file (restart.log), with ps snapshots before/after, so we can PROVE
+  # whether securityd/containermanagerd are actually (re)spawned — independent of install.log capture
+  # timing. The first line is written immediately (before any sleep) so an early Filza grab still shows
+  # that the script started.
   cat > "$RS" <<'RSEOF'
 #!/bin/sh
-LOG="$1"
-sleep 10                       # let the installer finish and the filesystem settle
-# Crane's own mechanism (killallProcessesWithName): kill the running instance so launchd respawns it
-# injected the next time something demands it. For daemons that ARE running this is all that's needed.
-for D in containermanagerd securityd cfprefsd lsd; do
-  if killall -9 "$D" 2>/dev/null; then echo "killall $D ok $(date)" >> "$LOG"
-  else echo "killall $D: not running $(date)" >> "$LOG"; fi
-done
-# Bonus: also force the on-demand daemons to start RIGHT NOW, so their support_*.log shows up even before
-# an app demands them. Best-effort and each BACKGROUNDED so a slow/stuck launchctl can never hang us.
+RLOG="$1"
+snap() {   # append a ps snapshot of our target daemons
+  echo "-- $1 $(date) --" >> "$RLOG"
+  ps -Axo pid,uid,comm 2>/dev/null | grep -iE 'securityd|containermanagerd|cfprefsd|[l]sd' >> "$RLOG" 2>/dev/null \
+    || ps ax 2>/dev/null | grep -iE 'securityd|containermanagerd|cfprefsd|[l]sd' >> "$RLOG" 2>/dev/null \
+    || echo "(ps unavailable)" >> "$RLOG"
+}
+echo "=== restart start $(date) ===" > "$RLOG"
+snap "BEFORE"
+sleep 8                        # let the installer finish and the filesystem settle
 LCTL=""
 for L in /var/jb/usr/bin/launchctl /usr/bin/launchctl /bin/launchctl; do [ -x "$L" ] && LCTL="$L" && break; done
+echo "launchctl: ${LCTL:-NONE}" >> "$RLOG"
+# Crane's own mechanism (killallProcessesWithName): kill a running instance so launchd respawns it
+# injected on next demand. securityd is usually NOT running (spawns per keychain op), so expect "none".
+for D in containermanagerd securityd cfprefsd lsd; do
+  if killall -9 "$D" 2>/dev/null; then echo "killall $D: ok" >> "$RLOG"
+  else echo "killall $D: not running" >> "$RLOG"; fi
+done
+# Force the on-demand daemons to start RIGHT NOW so a fresh (hopefully injected) process exists even
+# before an app demands it. Each backgrounded so a stuck launchctl can't hang us; capture return code.
 if [ -n "$LCTL" ]; then
   for S in system/com.apple.containermanagerd system/com.apple.securityd system/com.apple.cfprefsd.xpc.daemon; do
-    ( "$LCTL" kickstart "$S" >/dev/null 2>&1; echo "kickstart $S returned $(date)" >> "$LOG" ) &
+    ( "$LCTL" kickstart "$S" >/dev/null 2>&1; echo "kickstart $S rc=$?" >> "$RLOG" ) &
   done
 fi
-echo "restart pass done $(date)" >> "$LOG"
+sleep 4
+snap "AFTER"
+echo "=== restart done $(date) ===" >> "$RLOG"
 RSEOF
   chmod 0755 "$RS" 2>/dev/null
+  RLOG="$LOGDIR/restart.log"
   if command -v setsid >/dev/null 2>&1; then
-    setsid /bin/sh "$RS" "$LOG" >/dev/null 2>&1 </dev/null &
+    setsid /bin/sh "$RS" "$RLOG" >/dev/null 2>&1 </dev/null &
   else
-    /bin/sh "$RS" "$LOG" >/dev/null 2>&1 </dev/null &
+    /bin/sh "$RS" "$RLOG" >/dev/null 2>&1 </dev/null &
   fi
 fi
 
