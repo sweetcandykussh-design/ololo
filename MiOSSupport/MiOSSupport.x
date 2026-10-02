@@ -95,39 +95,32 @@ static long miosBootID(void) {
     return 0;
 }
 
-// Per-daemon, SELF-CLEARING watchdog. Arm a file before hooking; if the daemon survives a short health
-// window, a GCD timer deletes it (hooks are fine). If the daemon instead crashes within that window
-// (e.g. a bad hook hangs boot), the file remains, and the NEXT launch of that daemon sees it and stands
-// down — auto-heal, no user action and no dependence on SpringBoard. Per-daemon file names avoid
-// siblings interfering, and a stale file from an old build (the single "boot_armed") is simply ignored.
+// Per-daemon watchdog. The risky part is installing the hooks (that is what could hang boot). So we arm
+// a file right before init and CLEAR it right after init returns successfully — NOT on a timer. If init
+// crashes partway, the arm persists and the next launch of that daemon stands down (auto-heal). This is
+// robust for on-demand daemons (lsd, securityd) that exit quickly: the arm is cleared the instant init
+// finishes, so a normal fast exit never leaves a stale arm. A leftover arm therefore means exactly one
+// thing — a prior init crashed — and install-time cleanup removes any truly stale file.
+static NSString *miosArmPath(NSString *name) {
+    return [kMiOSBase stringByAppendingPathComponent:[@"boot_armed_" stringByAppendingString:name]];
+}
 static BOOL miosWatchdogArmOrDisable(NSString *name) {
-    NSString *armPath = [kMiOSBase stringByAppendingPathComponent:
-                         [@"boot_armed_" stringByAppendingString:name]];
+    NSString *armPath = miosArmPath(name);
     NSFileManager *fm = [NSFileManager defaultManager];
-    long cur = miosBootID();
-    NSString *existing = [NSString stringWithContentsOfFile:armPath encoding:NSUTF8StringEncoding error:nil];
-    if (existing.length) {
-        long armed = (long)[existing longLongValue];
-        if (armed == cur) {
-            // Same boot → this daemon just restarted normally (lsd & co. are on-demand). NOT a crash.
-            return YES;
-        }
-        // Armed on a PREVIOUS boot and never cleared → that boot hung before clearing → self-heal.
+    if ([fm fileExistsAtPath:armPath]) {
         supLog(@"watchdog", [NSString stringWithFormat:
-            @"%@: prior boot %ld hung (arm never cleared) — DISABLE this boot (self-heal)", name, armed]);
+            @"%@: a prior init armed but never cleared (it crashed) — DISABLE this run (self-heal)", name]);
         return NO;
     }
     @try {
-        [[NSString stringWithFormat:@"%ld", cur] writeToFile:armPath atomically:YES
+        [[NSString stringWithFormat:@"%ld", miosBootID()] writeToFile:armPath atomically:YES
                                                     encoding:NSUTF8StringEncoding error:nil];
         [fm setAttributes:@{ NSFilePosixPermissions: @(0666) } ofItemAtPath:armPath error:nil];
     } @catch (__unused id e) {}
-    // Survived the health window → healthy → clear the arm so the next launch proceeds normally.
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)25 * NSEC_PER_SEC),
-                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        [[NSFileManager defaultManager] removeItemAtPath:armPath error:nil];
-    });
     return YES;
+}
+static void miosWatchdogClear(NSString *name) {
+    @try { [[NSFileManager defaultManager] removeItemAtPath:miosArmPath(name) error:nil]; } @catch (__unused id e) {}
 }
 
 // Active container UUID for a bundle id, read from the central prefs the app writes. Returns nil for
@@ -553,7 +546,7 @@ static void initLsd(void) {
                     NSArray *b = [fm contentsOfDirectoryAtPath:
                                   [kMiOSBase stringByAppendingPathComponent:@"debug"] error:nil];
                     supLog(name, [NSString stringWithFormat:
-                        @"[ctor] NOT enabled (build=lsd-v4). MiOS/ = [%@] ; MiOS/debug/ = [%@] → skip",
+                        @"[ctor] NOT enabled (build=lsd-v5). MiOS/ = [%@] ; MiOS/debug/ = [%@] → skip",
                         [a componentsJoinedByString:@", "] ?: @"(nil)",
                         [b componentsJoinedByString:@", "] ?: @"(nil)"]);
                 } @catch (__unused id e) { supLog(name, @"[ctor] not enabled → skip"); }
@@ -565,6 +558,10 @@ static void initLsd(void) {
             else if ([name isEqualToString:@"cfprefsd"])          initCfprefsd();
             else if ([name isEqualToString:@"securityd"])         initSecurityd();
             else if ([name isEqualToString:@"lsd"])               initLsd();
+
+            // init returned without crashing → hooks installed fine → clear the watchdog arm so the next
+            // launch (on-demand daemons restart constantly) proceeds normally.
+            miosWatchdogClear(name);
         } @catch (__unused id e) {}
     }
 }

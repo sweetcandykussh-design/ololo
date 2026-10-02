@@ -9,6 +9,10 @@ mkdir -p "$LOGDIR"
 {
   echo "=== miOS bootstrap $(date) ==="
 
+  # Clear any stale watchdog arm files. A fresh install is a clean slate; a leftover arm (e.g. an
+  # on-demand daemon that exited before an older build cleared it) must not keep the new build disabled.
+  rm -f "$BASE"/boot_armed* 2>/dev/null && echo "cleared stale boot_armed* files"
+
   LCTL=""
   for L in /var/jb/usr/bin/launchctl /usr/bin/launchctl /bin/launchctl; do
     if [ -x "$L" ]; then LCTL="$L"; echo "launchctl: $L"; break; fi
