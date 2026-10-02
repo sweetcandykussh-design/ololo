@@ -51,6 +51,32 @@ static BOOL miosDisabled(void) {
             [kMiOSBase stringByAppendingPathComponent:@"disable"]];
 }
 
+// ---- sandbox: grant THIS daemon RW to our paths via libSandy (MiOS-Profile) ------------------------
+// System daemons (securityd, containermanagerd, cfprefsd) run under a tight sandbox that forbids writing
+// to /var/mobile/Library/Preferences/MiOS and /var/mobile/MiOSContainers. Without the extension the
+// dylib loads and %ctor runs, but every supLog write and every container-dir create silently fails (all
+// wrapped in @try) — which is exactly why support_securityd.log / support_containermanagerd.log never
+// appeared while lsd (whose own sandbox already allows …/Library/Preferences) logged fine. libSandy's
+// MiOS-Profile has AllowedProcesses = (*) and grants RW to our roots, so applying it from inside the
+// daemon fixes both logging and container redirection. Safe no-op if libSandy isn't installed.
+typedef int (*libSandy_applyProfile_t)(const char *profileName);
+static void miosApplySandbox(void) {
+    @try {
+        // Same paths the app side uses (confirmed working on-device).
+        const char *paths[] = {
+            "/usr/lib/libsandy.dylib",
+            "/var/jb/usr/lib/libsandy.dylib",
+            NULL
+        };
+        void *h = NULL;
+        for (int i = 0; paths[i]; i++) { h = dlopen(paths[i], RTLD_LAZY); if (h) break; }
+        if (!h) h = dlopen("libsandy.dylib", RTLD_LAZY);
+        if (!h) return;
+        libSandy_applyProfile_t apply = (libSandy_applyProfile_t)dlsym(h, "libSandy_applyProfile");
+        if (apply) apply("MiOS-Profile");
+    } @catch (__unused id e) {}
+}
+
 // ---- ANTI-BRICK SAFETY LAYER (mirrors Crane's own protection) --------------------------------------
 // Three independent safeguards so a bad daemon hook can NEVER permanently kill the jailbreak:
 //   1. Safe mode: ellekit sets _MSSafeMode=1 when booting with Volume-Up held. We no-op in it, so a
@@ -532,6 +558,10 @@ static void initLsd(void) {
             if (![name isEqualToString:@"containermanagerd"] && ![name isEqualToString:@"cfprefsd"] &&
                 ![name isEqualToString:@"securityd"] && ![name isEqualToString:@"lsd"]) return;
 
+            // Grant ourselves RW to /var/mobile/Library/Preferences/MiOS + /var/mobile/MiOSContainers
+            // BEFORE the first log write — otherwise a sandboxed daemon can't create support_<name>.log.
+            miosApplySandbox();
+
             // Unconditional proof-of-injection log — written the moment the dylib loads into the daemon,
             // BEFORE any gate, so we can tell "not injected" from "gated out" and see WHY it stops.
             supLog(name, [NSString stringWithFormat:@"[ctor] loaded in %@ (pid %d)", name, getpid()]);
@@ -546,7 +576,7 @@ static void initLsd(void) {
                     NSArray *b = [fm contentsOfDirectoryAtPath:
                                   [kMiOSBase stringByAppendingPathComponent:@"debug"] error:nil];
                     supLog(name, [NSString stringWithFormat:
-                        @"[ctor] NOT enabled (build=lsd-v5). MiOS/ = [%@] ; MiOS/debug/ = [%@] → skip",
+                        @"[ctor] NOT enabled (build=sandbox-v6). MiOS/ = [%@] ; MiOS/debug/ = [%@] → skip",
                         [a componentsJoinedByString:@", "] ?: @"(nil)",
                         [b componentsJoinedByString:@", "] ?: @"(nil)"]);
                 } @catch (__unused id e) { supLog(name, @"[ctor] not enabled → skip"); }
