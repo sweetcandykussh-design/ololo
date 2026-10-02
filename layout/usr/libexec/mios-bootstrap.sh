@@ -52,14 +52,52 @@ mkdir -p "$LOGDIR"
 # Only restart the Crane-style support daemons when daemon injection is explicitly opted in. By default
 # (no enable_daemons file) we never touch system daemons, so a normal install can't affect boot at all.
 # When opted in: do it detached + delayed so it never blocks the installer (killing securityd/cfprefsd
-# synchronously inside postinst caused the long "Configuring" hang). launchd (KeepAlive) respawns each
-# instantly; MiOSSupport's own safe-mode + boot-watchdog then protect against a bad hook.
+# synchronously inside postinst caused the long "Configuring" hang).
+#
+# IMPORTANT: a plain `killall` only re-execs a daemon that is CURRENTLY RUNNING. securityd and
+# containermanagerd are on-demand (launchd starts them lazily), so if they are not running at install
+# time, killall is a no-op and they never pick up the dylib until something demands them — which is why
+# their support_*.log never appeared. `launchctl kickstart -k` FORCES launchd to (re)spawn the service
+# even when it is not currently running, so the fresh process is injected right away. We fall back to
+# killall if kickstart is unavailable or the label is unknown. MiOSSupport's own safe-mode +
+# per-daemon boot-watchdog still protect against a bad hook on that forced spawn.
 if [ -f "$BASE/enable_daemons" ]; then
-  RESTART='sleep 12; for D in containermanagerd cfprefsd securityd lsd; do killall -9 "$D" 2>/dev/null; done; echo "restarted $(date)" >> '"$LOG"
+  RS="$BASE/.mios-restart.sh"
+  cat > "$RS" <<'RSEOF'
+#!/bin/sh
+LOG="$1"
+LCTL=""
+for L in /var/jb/usr/bin/launchctl /usr/bin/launchctl /bin/launchctl; do
+  [ -x "$L" ] && LCTL="$L" && break
+done
+# Give the installer time to finish and the filesystem to settle before we touch system daemons.
+sleep 12
+# kick <launchd-label> <process-name>: force a fresh, injected (re)spawn; fall back to killall.
+kick() {
+  _done=0
+  if [ -n "$LCTL" ]; then
+    for DOM in system gui/501 user/501; do
+      if "$LCTL" kickstart -k "$DOM/$1" 2>/dev/null; then
+        echo "kickstart $DOM/$1 ok" >> "$LOG"; _done=1; break
+      fi
+    done
+  fi
+  if [ "$_done" = 0 ]; then
+    killall -9 "$2" 2>/dev/null && echo "killall $2 ok" >> "$LOG" || echo "kick $2 noop (not running / no kickstart)" >> "$LOG"
+  fi
+}
+kick com.apple.containermanagerd      containermanagerd
+kick com.apple.securityd              securityd
+kick com.apple.cfprefsd.xpc.daemon    cfprefsd
+# lsd restarts itself constantly; a plain killall is enough and avoids guessing its label.
+killall -9 lsd 2>/dev/null && echo "killall lsd ok" >> "$LOG"
+echo "restart pass done $(date)" >> "$LOG"
+RSEOF
+  chmod 0755 "$RS" 2>/dev/null
   if command -v setsid >/dev/null 2>&1; then
-    setsid /bin/sh -c "$RESTART" >/dev/null 2>&1 </dev/null &
+    setsid /bin/sh "$RS" "$LOG" >/dev/null 2>&1 </dev/null &
   else
-    /bin/sh -c "$RESTART" >/dev/null 2>&1 </dev/null &
+    /bin/sh "$RS" "$LOG" >/dev/null 2>&1 </dev/null &
   fi
 fi
 
