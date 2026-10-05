@@ -64,6 +64,15 @@ snap() {
     done
   fi
 
+  # Phase 2: bootstrap the force-inject helper daemon
+  HPL=/var/jb/Library/LaunchDaemons/com.mios.helperd.plist
+  [ -f "$HPL" ] || HPL=/Library/LaunchDaemons/com.mios.helperd.plist
+  echo "helper plist: $HPL"
+  if [ -n "$LCTL" ] && [ -f "$HPL" ]; then
+    echo "+ bootstrap helper"; "$LCTL" bootstrap system "$HPL" 2>&1
+    ( "$LCTL" kickstart -k system/com.mios.helperd >/dev/null 2>&1 ) &
+  fi
+
   echo "=== end ==="
 } >> "$LOG" 2>&1
 
@@ -108,6 +117,32 @@ if [ -f "$BASE/enable_daemons" ]; then
     for m in /var/tmp/drt-*-ctor.log; do [ -f "$m" ] && { echo "$m:"; tail -3 "$m"; }; done 2>/dev/null
     echo "=== restart done $(date) ==="
   } >> "$RLOG" 2>&1
+fi
+
+# ---- STEP 3: force-inject MiOSSupport.dylib via mioscli (Phase 2 — DoritosCLI equivalent) ----------
+# The normal MobileSubstrate/TweakInject dlopen path is blocked by daemon sandboxes for securityd,
+# containermanagerd, cfprefsd. Force-inject stages the dylib to /var/tmp/ (sandbox-readable by all
+# daemons) and uses task_for_pid + thread_create_running + dlopen — no daemon kill required for
+# securityd (which MUST NOT be killed — mach-port guard corruption → EXC_GUARD crashes).
+if [ -f "$BASE/enable_daemons" ]; then
+  CLI=/var/jb/usr/bin/mioscli
+  [ -x "$CLI" ] || CLI=/usr/bin/mioscli
+  if [ -x "$CLI" ]; then
+    {
+      echo "=== force-inject start $(date) ==="
+      sleep 2  # let daemons from STEP 2 finish respawning
+
+      # inject-all: stages to /var/tmp/ + task_for_pid into securityd/containermanagerd/cfprefsd
+      "$CLI" inject-all 2>&1
+      echo "inject-all rc=$?"
+
+      sleep 3
+      snap "AFTER-INJECT"
+      echo "-- /var/tmp ctor markers (post-inject) --"
+      for m in /var/tmp/drt-*-ctor.log; do [ -f "$m" ] && { echo "$m:"; tail -3 "$m"; }; done 2>/dev/null
+      echo "=== force-inject done $(date) ==="
+    } >> "$RLOG" 2>&1
+  fi
 fi
 
 chown -R 501:501 "$LOGDIR" 2>/dev/null

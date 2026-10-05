@@ -25,12 +25,29 @@ MiOS_PRIVATE_FRAMEWORKS = MobileCoreServices
 MiOS_INSTALL_PATH = /Applications
 MiOS_CODESIGN_FLAGS = -Sentitlements.plist
 
-TOOL_NAME = miosd
+TOOL_NAME = miosd mioshelperd mioscli
 miosd_FILES = $(wildcard MiOSDaemon/*.m)
 miosd_CFLAGS = -fobjc-arc -Wno-deprecated-declarations
 miosd_FRAMEWORKS = Foundation
 miosd_CODESIGN_FLAGS = -Sdaemon-entitlements.plist
 miosd_INSTALL_PATH = /usr/libexec
+
+# Force-inject helper daemon (DoritosHelper equivalent): task_for_pid + thread_create_running.
+# Stages dylibs to /var/tmp (sandbox-readable), injects into daemons whose sandbox blocks the
+# normal MobileSubstrate/TweakInject dlopen path. Also runs a 30s watchdog that re-injects on respawn.
+mioshelperd_FILES = MiOSHelper/MiOSHelper.m
+mioshelperd_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -I$(THEOS_PROJECT_DIR)
+mioshelperd_FRAMEWORKS = Foundation
+mioshelperd_CODESIGN_FLAGS = -Shelper-entitlements.plist
+mioshelperd_INSTALL_PATH = /usr/libexec
+
+# CLI tool for direct injection (DoritosCLI equivalent). Has its own task_for_pid-allow so it can
+# inject standalone — the bootstrap script uses it without depending on the helper daemon being up.
+mioscli_FILES = MiOSCLI/MiOSCLI.m
+mioscli_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -I$(THEOS_PROJECT_DIR)
+mioscli_FRAMEWORKS = Foundation
+mioscli_CODESIGN_FLAGS = -Scli-entitlements.plist
+mioscli_INSTALL_PATH = /usr/bin
 
 include $(THEOS_MAKE_PATH)/tweak.mk
 include $(THEOS_MAKE_PATH)/application.mk

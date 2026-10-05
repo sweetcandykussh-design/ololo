@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.mios.helperd</string>
+	<key>Program</key>
+	<string>/var/jb/usr/libexec/mioshelperd</string>
+	<key>UserName</key>
+	<string>root</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ProcessType</key>
+	<string>Interactive</string>
+	<key>MachServices</key>
+	<dict>
+		<key>com.mios.helperd</key>
+		<true/>
+	</dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>_MSSafeMode</key>
+		<string>1</string>
+		<key>_SafeMode</key>
+		<string>1</string>
+	</dict>
+</dict>
+</plist>
