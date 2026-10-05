@@ -72,6 +72,11 @@ static CFStringRef gcMGProductType    = NULL;   // ProductType / HWModelStr   (d
 static CFStringRef gcMGHWModel        = NULL;   // HardwarePlatform           (hwModel)
 static CFStringRef gcMGDeviceName     = NULL;   // DeviceName / marketing-name
 static CFStringRef gcMGProductVersion = NULL;   // ProductVersion             (iosVersion)
+// Hardware-identity keys, derived per-container so each container reports a distinct, STABLE device
+// fingerprint (Phase 3 app-side parity). Handed out ONLY through the app-image-scoped MGCopyAnswer
+// path, exactly like the four above — system frameworks never see them.
+static CFStringRef gcMGSerialNumber   = NULL;   // SerialNumber
+static CFStringRef gcMGUDID           = NULL;   // UniqueDeviceID (modern 25-char ECID form)
 static CFTypeRef (*gRealMGCopyAnswer)(CFStringRef) = NULL;  // captured before dlsym is hooked
 
 // NOTE: we deliberately do NOT spoof the low-level OS sysctls (kern.osproductversion / kern.osversion /
@@ -167,6 +172,25 @@ static NSString *derivedSSID(void) {
     if (explicit.length > 0) return explicit;
     NSString *base = derivedPick(@"ssidbase", @[@"Home", @"WiFi", @"Net", @"Linksys", @"NETGEAR", @"TP-Link", @"iPhone"]);
     return [NSString stringWithFormat:@"%@-%@", base, derivedHex(gContainerUUID, @"ssidnum", 4)];
+}
+
+// Per-container hardware serial. Explicit prefs win; otherwise a stable 10-char value derived from the
+// container UUID (distinct per container, constant across launches). Charset doesn't need to match
+// Apple's exactly — apps fingerprint on its stability/uniqueness, not its format.
+static NSString *derivedSerial(void) {
+    NSString *explicit = spoofStr(@"serialNumber");
+    if (explicit.length > 0) return explicit;
+    return [@"F" stringByAppendingString:derivedHex(gContainerUUID, @"serial", 9)];
+}
+
+// Per-container UniqueDeviceID in the modern 25-char ECID form (8 hex, dash, 16 hex), derived from the
+// container UUID so it is distinct and stable per container. Explicit prefs win.
+static NSString *derivedUDID(void) {
+    NSString *explicit = spoofStr(@"udid");
+    if (explicit.length > 0) return explicit;
+    return [NSString stringWithFormat:@"%@-%@",
+            derivedHex(gContainerUUID, @"udidhi", 8),
+            derivedHex(gContainerUUID, @"udidlo", 16)];
 }
 
 // MARK: - GPS Location Hooks (per container)
@@ -740,6 +764,10 @@ static CFTypeRef mios_MGCopyAnswer(CFStringRef key) {
             return CFRetain(gcMGHWModel);
         if (gcMGProductVersion && CFEqual(key, CFSTR("ProductVersion")))
             return CFRetain(gcMGProductVersion);
+        if (gcMGSerialNumber && CFEqual(key, CFSTR("SerialNumber")))
+            return CFRetain(gcMGSerialNumber);
+        if (gcMGUDID && (CFEqual(key, CFSTR("UniqueDeviceID")) || CFEqual(key, CFSTR("UniqueDeviceIDData"))))
+            return CFRetain(gcMGUDID);
     }
     return gRealMGCopyAnswer ? gRealMGCopyAnswer(key) : NULL;
 }
@@ -750,7 +778,8 @@ static void *(*orig_dlsym)(void *, const char *) = NULL;
 
 static void *new_dlsym(void *handle, const char *symbol) {
     if (symbol && gDeviceSpoofActive && strcmp(symbol, "MGCopyAnswer") == 0 &&
-        (gcMGProductType || gcMGProductVersion || gcMGDeviceName || gcMGHWModel)) {
+        (gcMGProductType || gcMGProductVersion || gcMGDeviceName || gcMGHWModel ||
+         gcMGSerialNumber || gcMGUDID)) {
         return (void *)mios_MGCopyAnswer;
     }
     return orig_dlsym ? orig_dlsym(handle, symbol) : NULL;
@@ -834,6 +863,10 @@ static void miosBuildSpoofCache(void) {
         gcMGHWModel        = retainedCF(spoofStr(@"hwModel"));
         gcMGDeviceName     = retainedCF(spoofStr(@"deviceName"));
         gcMGProductVersion = retainedCF(spoofStr(@"iosVersion"));
+        // Hardware-identity fingerprint: explicit prefs win; otherwise derive a distinct, STABLE value
+        // per container so each container looks like its own physical unit (serial + UDID).
+        gcMGSerialNumber   = retainedCF(derivedSerial());
+        gcMGUDID           = retainedCF(derivedUDID());
     }
     if (wifiSpoofActive()) {
         NSString *ssid  = derivedSSID();
@@ -1059,7 +1092,8 @@ static void miosRedirectLog(NSString *line) {
             // MGCopyAnswer: apps like Instagram read the model/iOS from MobileGestalt. We never patch
             // the real MGCopyAnswer (that crashes CoreTelephony/Shadow). First we capture the real
             // function, then hook dlsym so a runtime lookup of "MGCopyAnswer" returns OUR impl.
-            if (gcMGProductType || gcMGProductVersion || gcMGDeviceName || gcMGHWModel) {
+            if (gcMGProductType || gcMGProductVersion || gcMGDeviceName || gcMGHWModel ||
+                gcMGSerialNumber || gcMGUDID) {
                 void *mgH = dlopen("/usr/lib/libMobileGestalt.dylib", RTLD_LAZY);
                 if (!mgH) mgH = dlopen("/var/jb/usr/lib/libMobileGestalt.dylib", RTLD_LAZY);
                 if (mgH) gRealMGCopyAnswer = (CFTypeRef(*)(CFStringRef))dlsym(mgH, "MGCopyAnswer");
