@@ -43,7 +43,8 @@ mioshelperd_INSTALL_PATH = /usr/libexec
 
 # CLI tool for direct injection (DoritosCLI equivalent). Has its own task_for_pid-allow so it can
 # inject standalone — the bootstrap script uses it without depending on the helper daemon being up.
-mioscli_FILES = MiOSCLI/MiOSCLI.m
+# Dir is MiOSCLITool (not MiOSCLI) to avoid a case-insensitive-FS collision with the output binary.
+mioscli_FILES = MiOSCLITool/MiOSCLI.m
 mioscli_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -I$(THEOS_PROJECT_DIR)
 mioscli_FRAMEWORKS = Foundation
 mioscli_CODESIGN_FLAGS = -Scli-entitlements.plist
