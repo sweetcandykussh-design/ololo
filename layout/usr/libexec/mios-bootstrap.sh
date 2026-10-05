@@ -78,23 +78,34 @@ if [ -f "$BASE/enable_daemons" ]; then
     echo "launchctl: ${LCTL:-NONE}"
     snap "BEFORE"
 
-    # Crane's own mechanism (killallProcessesWithName): kill any running instance so launchd respawns it
-    # injected on next demand. securityd is usually NOT running (it spawns per keychain op), so "none".
-    for D in containermanagerd securityd cfprefsd lsd; do
+    # KILLABLE daemons: SIGKILL so launchd KeepAlive respawns them fresh, and ellekit injects our dylib
+    # at process start (loaded BEFORE the sandbox is sealed, so the /var/jb DynamicLibraries path works —
+    # this is the path lsd already uses successfully). Doritos kills exactly these on install.
+    #
+    # securityd is DELIBERATELY NOT killed: `killall -9 securityd` corrupts mach-port guards and triggers
+    # EXC_GUARD crashes in apps launched right after (documented Doritos 2026-04 incident). securityd is
+    # restarted the safe way below via `launchctl kickstart -k`.
+    for D in containermanagerd cfprefsd lsd; do
       if killall -9 "$D" 2>/dev/null; then echo "killall $D: ok"
       else echo "killall $D: not running"; fi
     done
 
-    # Force the on-demand daemons to start RIGHT NOW so a fresh (hopefully injected) process exists even
-    # before an app demands it. Each backgrounded so a stuck launchctl can't hang us; capture rc.
+    # securityd: clean restart via launchctl (never killall). kickstart -k = SIGTERM-then-SIGKILL with a
+    # grace window, the API Apple documents for restarting a launchd service → clean respawn → ellekit
+    # injects DoritosSecurityd-equivalent at start. system/ form works on iOS 15–18 despite the
+    # "switch to user/foreground" warning. Backgrounded so a slow launchctl can't hang us.
     if [ -n "$LCTL" ]; then
-      for S in system/com.apple.containermanagerd system/com.apple.securityd system/com.apple.cfprefsd.xpc.daemon; do
+      ( "$LCTL" kickstart -k system/com.apple.securityd >/dev/null 2>&1; echo "kickstart securityd rc=$?" >> "$RLOG" ) &
+      # Also nudge the on-demand ones in case KeepAlive didn't relaunch them yet (harmless if already up).
+      for S in system/com.apple.containermanagerd system/com.apple.cfprefsd.xpc.daemon; do
         ( "$LCTL" kickstart "$S" >/dev/null 2>&1; echo "kickstart $S rc=$?" >> "$RLOG" ) &
       done
     fi
 
     sleep 5
     snap "AFTER"
+    echo "-- /var/tmp ctor markers --"
+    for m in /var/tmp/drt-*-ctor.log; do [ -f "$m" ] && { echo "$m:"; tail -3 "$m"; }; done 2>/dev/null
     echo "=== restart done $(date) ==="
   } >> "$RLOG" 2>&1
 fi

@@ -25,8 +25,13 @@
 #import <dlfcn.h>
 #import <stdlib.h>
 #import <unistd.h>
+#import <stdio.h>
+#import <string.h>
+#import <time.h>
 #import <sys/sysctl.h>
 #import <sys/time.h>
+#import <sys/stat.h>
+#import <mach-o/dyld.h>
 
 static NSString *const kMiOSBase = @"/var/mobile/Library/Preferences/MiOS";
 
@@ -546,6 +551,41 @@ static void initLsd(void) {
     }
 }
 
+// ---- /var/tmp ctor marker (sandbox-writable by every daemon; proves injection without libSandy) -----
+// Doritos does exactly this: each daemon writes drt-<name>-ctor.log at ctor entry so the installer can
+// poll for a fresh `ts=` to confirm the hook actually loaded. Plain C stdio to /var/tmp, which every
+// daemon sandbox permits — independent of the /var/mobile/... path that needs libSandy. `note` is
+// usually "ctor"; the dual-load guard writes "DUAL-LOAD" instead.
+static void miosCtorMarker(const char *shortName, const char *note) {
+    char path[160];
+    snprintf(path, sizeof(path), "/var/tmp/drt-%s-ctor.log", shortName);
+    FILE *f = fopen(path, "a");
+    if (f) {
+        fprintf(f, "%s pid=%d ppid=%d ts=%ld\n", note, getpid(), getppid(), (long)time(NULL));
+        fclose(f);
+        chmod(path, 0666);
+    }
+}
+
+// ---- DUAL-LOAD guard -------------------------------------------------------------------------------
+// If our dylib is mapped more than once in the same process (e.g. a staged /var/tmp copy AND the
+// canonical DynamicLibraries/TweakInject path), the second %ctor's MSHookFunction rewires what the
+// first install recorded as %orig → infinite recursion or a PC=0 crash (the documented cfprefsd /
+// securityd hazard in Doritos). Count loaded images whose basename matches ours; if >1, bail without
+// installing a second set of hooks.
+static BOOL miosDualLoaded(void) {
+    const char *base = "MiOSSupport.dylib";
+    uint32_t n = _dyld_image_count();
+    int copies = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        const char *p = _dyld_get_image_name(i);
+        if (!p) continue;
+        const char *b = strrchr(p, '/'); b = b ? b + 1 : p;
+        if (strcmp(b, base) == 0) copies++;
+    }
+    return copies > 1;
+}
+
 // ---- entry point -----------------------------------------------------------------------------------
 %ctor {
     @autoreleasepool {
@@ -557,6 +597,14 @@ static void initLsd(void) {
             NSString *name = exe.lastPathComponent;
             if (![name isEqualToString:@"containermanagerd"] && ![name isEqualToString:@"cfprefsd"] &&
                 ![name isEqualToString:@"securityd"] && ![name isEqualToString:@"lsd"]) return;
+            const char *cname = [name UTF8String];
+
+            // Proof-of-injection marker to /var/tmp — ALWAYS writable by the daemon's sandbox, so this
+            // lands even when the /var/mobile/... supLog path is blocked. Written before anything else.
+            miosCtorMarker(cname, "ctor");
+
+            // Never install a second set of hooks if the dylib got mapped twice (→ %orig corruption).
+            if (miosDualLoaded()) { miosCtorMarker(cname, "DUAL-LOAD"); return; }
 
             // Grant ourselves RW to /var/mobile/Library/Preferences/MiOS + /var/mobile/MiOSContainers
             // BEFORE the first log write — otherwise a sandboxed daemon can't create support_<name>.log.
@@ -576,7 +624,7 @@ static void initLsd(void) {
                     NSArray *b = [fm contentsOfDirectoryAtPath:
                                   [kMiOSBase stringByAppendingPathComponent:@"debug"] error:nil];
                     supLog(name, [NSString stringWithFormat:
-                        @"[ctor] NOT enabled (build=sandbox-v6). MiOS/ = [%@] ; MiOS/debug/ = [%@] → skip",
+                        @"[ctor] NOT enabled (build=doritos-v7). MiOS/ = [%@] ; MiOS/debug/ = [%@] → skip",
                         [a componentsJoinedByString:@", "] ?: @"(nil)",
                         [b componentsJoinedByString:@", "] ?: @"(nil)"]);
                 } @catch (__unused id e) { supLog(name, @"[ctor] not enabled → skip"); }
