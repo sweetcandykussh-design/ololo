@@ -18,6 +18,7 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <sys/sysctl.h>
+#include <sys/stat.h>
 #include <stdio.h>
 #include <string.h>
 

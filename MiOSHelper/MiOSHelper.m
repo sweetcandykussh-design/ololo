@@ -178,8 +178,12 @@ int main(int argc, char **argv) {
         hlog(@"[start] mioshelperd up (force-inject helper + watchdog)");
         gLastPIDs = [NSMutableDictionary dictionary];
 
-        // XPC Mach service listener
-        xpc_connection_t listener = xpc_connection_create_mach_service(
+        // XPC Mach service listener — xpc_connection_create_mach_service is present on iOS but the SDK
+        // marks it __API_UNAVAILABLE(ios). Look it up via dlsym (standard jailbreak pattern).
+        typedef xpc_connection_t (*xpc_create_mach_fn)(const char *, dispatch_queue_t, uint64_t);
+        xpc_create_mach_fn _create_mach = (xpc_create_mach_fn)dlsym(RTLD_DEFAULT, "xpc_connection_create_mach_service");
+        if (!_create_mach) { hlog(@"[FATAL] xpc_connection_create_mach_service not found"); return 1; }
+        xpc_connection_t listener = _create_mach(
             "com.mios.helperd", NULL, XPC_CONNECTION_MACH_SERVICE_LISTENER);
 
         xpc_connection_set_event_handler(listener, ^(xpc_object_t peer) {
