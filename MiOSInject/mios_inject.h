@@ -137,9 +137,3 @@ fail:
     mach_port_deallocate(mach_task_self(), task);
     return kr;
 }
-
-static BOOL mios_inject_process(const char *procName, const char *dylib_path) {
-    pid_t pid = mios_find_pid(procName);
-    if (pid == 0) return NO;
-    return mios_inject_pid(pid, dylib_path) == KERN_SUCCESS;
-}
