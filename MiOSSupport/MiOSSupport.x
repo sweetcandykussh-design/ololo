@@ -551,6 +551,34 @@ static void initLsd(void) {
     }
 }
 
+// ---- Phase 3: accountsd (system-accounts isolation) — DISCOVERY ------------------------------------
+// accountsd owns ACAccountStore: the system account DB (mail, social, etc.). For full per-container
+// identity parity (Doritos) each container should see only its own system accounts. We don't yet have
+// this daemon's on-device class dump, so this pass is DISCOVERY ONLY (logs the real account-store API)
+// — exactly how securityd/lsd were locked in. No behavioral hook → safe. The next device run's
+// support_accountsd.log gives the precise class/selectors to hook.
+static void initAccountsd(void) {
+    supLog(@"accountsd", @"[init] MiOSSupport up in accountsd (discovery only)");
+    const char *classes[] = { "ACDAccountStore", "ACDServer", "ACDDatabase",
+                              "ACDClientAuthorizationManager", "ACAccount" };
+    for (size_t i = 0; i < sizeof(classes) / sizeof(classes[0]); i++)
+        miosDumpClassMethods(classes[i], @"accountsd");
+    miosDumpClassesByPrefix("ACD", @"ccount,lient,atabase,undle,dentif", @"accountsd");
+}
+
+// ---- Phase 3: apsd (per-container push tokens) — DISCOVERY -----------------------------------------
+// apsd owns Apple Push: per-app device tokens. For a distinct per-container device, each container's
+// token registration should be namespaced so a container gets its own token (Doritos parity). Again
+// DISCOVERY ONLY until we have the device class dump — logs the courier/registration API. No hook → safe.
+static void initApsd(void) {
+    supLog(@"apsd", @"[init] MiOSSupport up in apsd (discovery only)");
+    const char *classes[] = { "APSCourier", "APSConnectionServer", "APSDaemon",
+                              "APSRegistrationStore", "APSIncomingMessage" };
+    for (size_t i = 0; i < sizeof(classes) / sizeof(classes[0]); i++)
+        miosDumpClassMethods(classes[i], @"apsd");
+    miosDumpClassesByPrefix("APS", @"oken,egist,undle,lient,ourier", @"apsd");
+}
+
 // ---- /var/tmp ctor marker (sandbox-writable by every daemon; proves injection without libSandy) -----
 // Doritos does exactly this: each daemon writes drt-<name>-ctor.log at ctor entry so the installer can
 // poll for a fresh `ts=` to confirm the hook actually loaded. Plain C stdio to /var/tmp, which every
@@ -596,7 +624,8 @@ static BOOL miosDualLoaded(void) {
             NSString *exe = (_NSGetExecutablePath(buf, &sz) == 0) ? @(buf) : @"";
             NSString *name = exe.lastPathComponent;
             if (![name isEqualToString:@"containermanagerd"] && ![name isEqualToString:@"cfprefsd"] &&
-                ![name isEqualToString:@"securityd"] && ![name isEqualToString:@"lsd"]) return;
+                ![name isEqualToString:@"securityd"] && ![name isEqualToString:@"lsd"] &&
+                ![name isEqualToString:@"accountsd"] && ![name isEqualToString:@"apsd"]) return;
             const char *cname = [name UTF8String];
 
             // Proof-of-injection marker to /var/tmp — ALWAYS writable by the daemon's sandbox, so this
@@ -624,7 +653,7 @@ static BOOL miosDualLoaded(void) {
                     NSArray *b = [fm contentsOfDirectoryAtPath:
                                   [kMiOSBase stringByAppendingPathComponent:@"debug"] error:nil];
                     supLog(name, [NSString stringWithFormat:
-                        @"[ctor] NOT enabled (build=doritos-v7). MiOS/ = [%@] ; MiOS/debug/ = [%@] → skip",
+                        @"[ctor] NOT enabled (build=phase3-v1). MiOS/ = [%@] ; MiOS/debug/ = [%@] → skip",
                         [a componentsJoinedByString:@", "] ?: @"(nil)",
                         [b componentsJoinedByString:@", "] ?: @"(nil)"]);
                 } @catch (__unused id e) { supLog(name, @"[ctor] not enabled → skip"); }
@@ -636,6 +665,8 @@ static BOOL miosDualLoaded(void) {
             else if ([name isEqualToString:@"cfprefsd"])          initCfprefsd();
             else if ([name isEqualToString:@"securityd"])         initSecurityd();
             else if ([name isEqualToString:@"lsd"])               initLsd();
+            else if ([name isEqualToString:@"accountsd"])         initAccountsd();
+            else if ([name isEqualToString:@"apsd"])              initApsd();
 
             // init returned without crashing → hooks installed fine → clear the watchdog arm so the next
             // launch (on-demand daemons restart constantly) proceeds normally.
